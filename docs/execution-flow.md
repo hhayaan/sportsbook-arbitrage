@@ -13,6 +13,7 @@
        │     Group prices by selection
        │     For each cross-venue pair: sigma = 1/odds_a + 1/odds_b
        │     If sigma < 1.0: arb candidate found
+       │     Draw selections excluded (3-way soccer moneylines are not valid 2-way arbs)
        │
 5. SAFETY CHECKS (per candidate):
        │  ├── Circuit breaker: cumulative loss or rejection rate

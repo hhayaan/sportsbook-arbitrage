@@ -60,6 +60,10 @@
 
 ## Engine
 
+### Arbs with "DRAW" selections (fake arbs)
+**Cause**: Soccer/MLS moneylines are 3-way (win/draw/lose). Pairing "Team A wins" with "Draw" is not a valid 2-way arb — if Team B wins, both bets lose.
+**Fix**: Fixed in `arb_detector.rs` — draw selections are excluded from moneyline complementarity checks. Only team-vs-team pairs are valid.
+
 ### "failed to open sqlite db"
 **Cause**: `data/` directory doesn't exist relative to where the engine runs.
 **Fix**: `mkdir C:\dev\sports-arb-h2\engine\data`

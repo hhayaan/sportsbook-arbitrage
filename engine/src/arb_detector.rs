@@ -112,7 +112,7 @@ pub fn detect_arbs(book: &Book, now_ms: u64, max_data_age_ms: u64, require_pinna
 
 fn are_selections_complementary(market_type: &str, sel_a: &str, sel_b: &str) -> bool {
     match market_type {
-        "moneyline" => sel_a != sel_b,
+        "moneyline" => sel_a != sel_b && sel_a != "draw" && sel_b != "draw",
         "total" | "team_total" => {
             (sel_a == "over" && sel_b == "under") || (sel_a == "under" && sel_b == "over")
         }

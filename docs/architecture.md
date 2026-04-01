@@ -46,7 +46,7 @@ The brain of the system. Runs a Tokio async runtime with:
 
 - **Odds Fetcher** (`odds_fetcher.rs`) — Concurrent HTTP fetchers for DK (via proxy), FD, and Pinnacle. Fetches 15+ endpoints in parallel every 5 seconds.
 - **Order Book** (`models.rs`) — Two-level HashMap: `MarketIdentityKey -> VenueSelectionKey -> PriceEntry`. Groups the same bet across venues for comparison.
-- **Arb Detector** (`arb_detector.rs`) — For each market, checks all cross-venue pairs. If `sigma = 1/odds_a + 1/odds_b < 1.0`, it's a guaranteed-profit arb.
+- **Arb Detector** (`arb_detector.rs`) — For each market, checks all cross-venue pairs. If `sigma = 1/odds_a + 1/odds_b < 1.0`, it's a guaranteed-profit arb. Draw selections are excluded from moneyline pairing (3-way soccer markets are not valid 2-way arbs).
 - **Stake Optimizer** (`stake_optimizer.rs`) — Proportional stake sizing to equalize payouts across both legs.
 - **Live Executor** (`live_executor.rs`) — Sends bet commands over WebSocket to the bet placer. FD-first ordering (soft book). 20s fill timeout.
 - **Paper Executor** (`paper_executor.rs`) — Simulated instant fills for testing.
