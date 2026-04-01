@@ -1,0 +1,13 @@
+{
+  "name": "arb-command-listener",
+  "version": "1.0.0",
+  "description": "WebSocket command listener — bridges Rust arb engine to Patchright browser automation",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "patchright": "^1.58.2",
+    "ws": "^8.18.0"
+  }
+}

@@ -1,0 +1,383 @@
+mod models;
+mod config;
+mod db;
+mod odds_fetcher;
+mod arb_detector;
+mod stake_optimizer;
+mod paper_executor;
+mod live_executor;
+mod ws;
+mod api;
+mod team_names;
+mod circuit_breaker;
+mod rate_limiter;
+mod odds_verifier;
+mod rescue_hedger;
+mod treasury;
+mod state_machine;
+mod policy;
+mod trades;
+
+use api::AppState;
+use axum::{routing::{get, post}, Router};
+use std::sync::Arc;
+use std::time::Duration;
+use tower_http::cors::{CorsLayer, Any};
+
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .init();
+
+    let live_mode = std::env::var("LIVE_MODE").unwrap_or_default() == "1";
+    if live_mode {
+        tracing::info!("=== Arb Engine V3 — LIVE TRADING ===");
+    } else {
+        tracing::info!("=== Arb Engine V3 — Paper Trading ===");
+    }
+
+    // Init DB
+    let db = Arc::new(db::Db::open("data/trades.db"));
+    tracing::info!("SQLite initialized at data/trades.db");
+
+    // Apply env var overrides to settings
+    let mut settings_overrides = db.get_settings();
+    let mut any_override = false;
+    if let Ok(v) = std::env::var("FIXED_STAKE") {
+        if let Ok(val) = v.parse::<f64>() { settings_overrides.fixed_stake = val; any_override = true; }
+    }
+    if let Ok(v) = std::env::var("MAX_STAKE") {
+        if let Ok(val) = v.parse::<f64>() { settings_overrides.max_stake = val; any_override = true; }
+    }
+    if let Ok(v) = std::env::var("MIN_ARB_PCT") {
+        if let Ok(val) = v.parse::<f64>() { settings_overrides.min_arb_pct = val; any_override = true; }
+    }
+    if let Ok(v) = std::env::var("STAKE_MODE") {
+        settings_overrides.stake_mode = v; any_override = true;
+    }
+    if let Ok(v) = std::env::var("PROPORTIONAL_PCT") {
+        if let Ok(val) = v.parse::<f64>() { settings_overrides.proportional_pct = val; any_override = true; }
+    }
+    if let Ok(v) = std::env::var("ENABLED") {
+        settings_overrides.enabled = v == "1" || v == "true"; any_override = true;
+    }
+    if any_override {
+        db.update_settings(&settings_overrides);
+    }
+    tracing::info!(
+        "Settings: enabled={} stake_mode={} fixed_stake=${:.2} max_stake=${:.2} min_arb_pct={:.1}%",
+        settings_overrides.enabled, settings_overrides.stake_mode,
+        settings_overrides.fixed_stake, settings_overrides.max_stake, settings_overrides.min_arb_pct
+    );
+
+    // Init WebSocket broadcaster
+    let (ws_tx, _) = ws::create_broadcaster();
+    let ws_tx = Arc::new(ws_tx);
+
+    // Shared state
+    let state = Arc::new(AppState {
+        db: db.clone(),
+        ws_tx: ws_tx.clone(),
+    });
+
+    // HTTP client for odds fetching
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .danger_accept_invalid_certs(true) // DK's TLS causes issues with native-tls on Windows
+        .build()
+        .expect("failed to create HTTP client");
+
+    // Background polling task
+    let poll_db = db.clone();
+    let poll_ws = ws_tx.clone();
+    let poll_client = http_client.clone();
+    tokio::spawn(async move {
+        // Connect to bet placer WebSocket if in live mode
+        let ws_conn = if live_mode {
+            let ws_url = std::env::var("WS_URL").unwrap_or_else(|_| "ws://127.0.0.1:3402".to_string());
+            match live_executor::connect(&ws_url).await {
+                Ok((writer, reader)) => {
+                    tracing::info!("WebSocket connected to bet placer at {}", ws_url);
+
+                    // Fetch real sportsbook balances and seed the DB
+                    match live_executor::fetch_balances(&writer, &reader).await {
+                        Ok(balances) => {
+                            for (venue, balance) in &balances {
+                                poll_db.update_balance(venue, *balance);
+                                tracing::info!("[BALANCE] {} = ${:.2} (live)", venue, balance);
+                            }
+                            let db_balances = poll_db.get_balances();
+                            let _ = poll_ws.send(models::WsEvent::BalanceUpdated { balances: db_balances });
+                        }
+                        Err(e) => {
+                            tracing::warn!("Could not fetch live balances: {}", e);
+                        }
+                    }
+
+                    Some((writer, reader))
+                }
+                Err(e) => {
+                    tracing::error!("WebSocket connection failed: {} — falling back to paper", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let mut book = models::Book::new(config::MAX_DATA_AGE_MS);
+        // Time-based dedup: maps trade_key → last trade timestamp
+        let mut traded_keys: std::collections::HashMap<String, std::time::Instant> = std::collections::HashMap::new();
+        let dedup_cooldown = std::time::Duration::from_secs(60);
+
+        // Safety modules
+        // Paper trading: generous limits (real trading would use 3-5 bets/hour)
+        let mut cb = circuit_breaker::CircuitBreaker::new(500.0, 3600, 0.5, 20, 60);
+        let venue_limits: std::collections::HashMap<String, u32> = config::VENUES
+            .iter()
+            .map(|v| (v.to_string(), 200u32)) // 200 bets/hour for paper
+            .collect();
+        let mut rl = rate_limiter::RateLimiter::new(venue_limits, 60);
+        let mut last_venue_data: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+
+        // Diff-based book updates: only update entries where odds/line/live changed
+        let mut market_hashes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut diff_cycle_count: u64 = 0;
+
+        loop {
+            tracing::info!("── Polling odds from DK / FD / PIN ──");
+
+            let markets = odds_fetcher::fetch_all(&poll_client).await;
+
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+
+            // Diff-based book update: only update markets where price changed
+            let mut changed = 0u64;
+            let mut unchanged = 0u64;
+            let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+            for m in &markets {
+                let diff_key = format!("{}:{}:{}", m.venue, m.venue_market_id, m.selection);
+                let hash = format!("{:.4}|{:?}|{}", m.decimal_odds, m.line, m.is_live);
+                seen_keys.insert(diff_key.clone());
+
+                let is_new = match market_hashes.get(&diff_key) {
+                    Some(prev) => prev != &hash,
+                    None => true,
+                };
+
+                if is_new {
+                    book.update(m);
+                    market_hashes.insert(diff_key, hash);
+                    changed += 1;
+                } else {
+                    unchanged += 1;
+                }
+
+                last_venue_data.insert(m.venue.clone(), now_ms);
+            }
+
+            // Clean stale diff keys every 3 cycles
+            diff_cycle_count += 1;
+            if diff_cycle_count % 3 == 0 {
+                let before = market_hashes.len();
+                market_hashes.retain(|k, _| seen_keys.contains(k));
+                let removed = before - market_hashes.len();
+                if removed > 0 {
+                    tracing::debug!("Diff cleanup: removed {} stale keys", removed);
+                }
+            }
+
+            tracing::info!("Fetched {} markets ({}  changed, {} unchanged)", markets.len(), changed, unchanged);
+
+            book.expire(now_ms);
+            rl.prune();
+
+            // Log venue health
+            for venue in config::VENUES {
+                let age = last_venue_data.get(*venue)
+                    .map(|t| now_ms.saturating_sub(*t))
+                    .unwrap_or(u64::MAX);
+                let count = markets.iter().filter(|m| m.venue == *venue).count();
+                if age > 60_000 && count == 0 {
+                    tracing::warn!("[HEALTH] {} — no data for {}s", venue, age / 1000);
+                }
+            }
+
+            tracing::info!("Book: {} entries across {} identity keys",
+                book.total_entries(),
+                book.identity_keys().len(),
+            );
+
+            // Detect arbs
+            // require_pinnacle_leg: only trade arbs with Pinnacle on one side
+            // Set to false for testing, true for production
+            let require_pinnacle_leg = false; // TODO: load from config
+            let candidates = arb_detector::detect_arbs(&book, now_ms, config::MAX_DATA_AGE_MS, require_pinnacle_leg);
+
+            if !candidates.is_empty() {
+                tracing::info!("Detected {} arb candidates", candidates.len());
+            }
+
+            let settings = poll_db.get_settings();
+
+            for candidate in &candidates {
+                let arb_id = uuid::Uuid::new_v4().to_string();
+                let now_str = chrono::Utc::now().to_rfc3339();
+
+                let arb_opp = models::ArbOpportunity {
+                    id: arb_id.clone(),
+                    detected_at: now_str,
+                    event_id: candidate.event_id.clone(),
+                    sport: candidate.sport.clone(),
+                    market_type: candidate.market_type.clone(),
+                    sigma: candidate.sigma,
+                    arb_pct: candidate.arb_pct * 100.0,
+                    leg1_venue: candidate.leg1_venue.clone(),
+                    leg1_selection: candidate.leg1_selection.clone(),
+                    leg1_odds: candidate.leg1_odds,
+                    leg2_venue: candidate.leg2_venue.clone(),
+                    leg2_selection: candidate.leg2_selection.clone(),
+                    leg2_odds: candidate.leg2_odds,
+                    traded: false,
+                };
+
+                poll_db.insert_arb(&arb_opp);
+                let _ = poll_ws.send(models::WsEvent::ArbDetected { arb: arb_opp });
+
+                tracing::info!(
+                    "[ARB] {:.2}% | {} {} | {}@{:.3} ({}) vs {}@{:.3} ({})",
+                    candidate.arb_pct * 100.0,
+                    candidate.sport,
+                    candidate.market_type,
+                    candidate.leg1_selection, candidate.leg1_odds, candidate.leg1_venue,
+                    candidate.leg2_selection, candidate.leg2_odds, candidate.leg2_venue,
+                );
+
+                // --- Safety checks before trading ---
+
+                // Circuit breaker
+                if let Some(reason) = cb.check() {
+                    tracing::warn!("[CIRCUIT BREAKER] Trading paused: {}", reason);
+                    break;
+                }
+
+                // Rate limiter
+                if let Err((count, max)) = rl.check(&candidate.leg1_venue) {
+                    tracing::warn!("[RATE LIMIT] {} at {}/{} bets/hour", candidate.leg1_venue, count, max);
+                    continue;
+                }
+                if let Err((count, max)) = rl.check(&candidate.leg2_venue) {
+                    tracing::warn!("[RATE LIMIT] {} at {}/{} bets/hour", candidate.leg2_venue, count, max);
+                    continue;
+                }
+
+                // Odds drift verification
+                if let Err(reason) = odds_verifier::verify_both_legs(&book, candidate, 0.03) {
+                    tracing::info!("[ODDS DRIFT] {}", reason);
+                    continue;
+                }
+
+                // Execute trade if enabled
+                if settings.enabled {
+                    // In live mode, skip arbs involving non-bettable venues
+                    if live_mode {
+                        let bettable = ["fanduel", "draftkings", "pinnacle"];
+                        if !bettable.contains(&candidate.leg1_venue.as_str())
+                            || !bettable.contains(&candidate.leg2_venue.as_str())
+                        {
+                            continue;
+                        }
+                    }
+
+                    let candidate_to_trade = candidate.clone();
+
+                    let trade_key = format!(
+                        "{}:{}:{}:{}",
+                        candidate_to_trade.event_id, candidate_to_trade.market_type,
+                        candidate_to_trade.leg1_venue, candidate_to_trade.leg2_venue
+                    );
+
+                    // Time-based dedup: skip if traded within cooldown period
+                    let should_trade = match traded_keys.get(&trade_key) {
+                        Some(last) => last.elapsed() >= dedup_cooldown,
+                        None => true,
+                    };
+
+                    if should_trade {
+                        // Branch: live execution via WebSocket or paper execution
+                        let trade_result = if let Some((ref writer, ref reader)) = ws_conn {
+                            live_executor::try_execute(writer, reader, &poll_db, &candidate_to_trade, &settings).await
+                        } else {
+                            paper_executor::try_execute(&poll_db, &candidate_to_trade, &settings)
+                        };
+
+                        if let Some(trade) = trade_result {
+                            let mode_label = if ws_conn.is_some() { "LIVE" } else { "PAPER" };
+                            tracing::info!(
+                                "[{}] ${:.2} profit on {} {} | {}@{:.3} + {}@{:.3}",
+                                mode_label,
+                                trade.theoretical_profit, trade.sport, trade.market_type,
+                                trade.leg1_selection, trade.leg1_odds,
+                                trade.leg2_selection, trade.leg2_odds,
+                            );
+                            poll_db.mark_arb_traded(&arb_id);
+                            traded_keys.insert(trade_key, std::time::Instant::now());
+
+                            // Record in safety modules
+                            rl.record(&candidate.leg1_venue);
+                            rl.record(&candidate.leg2_venue);
+                            cb.record(trade.theoretical_profit, false);
+
+                            let balances = poll_db.get_balances();
+                            let _ = poll_ws.send(models::WsEvent::TradeExecuted { trade });
+                            let _ = poll_ws.send(models::WsEvent::BalanceUpdated { balances });
+                        }
+                    }
+                }
+            }
+
+            // Clean up expired dedup entries
+            traded_keys.retain(|_, last| last.elapsed() < dedup_cooldown * 3);
+
+            // Broadcast poll status
+            for venue in config::VENUES {
+                let count = markets.iter().filter(|m| m.venue == *venue).count();
+                let _ = poll_ws.send(models::WsEvent::PollStatus {
+                    venue: venue.to_string(),
+                    markets: count,
+                });
+            }
+
+            tokio::time::sleep(Duration::from_secs(config::POLL_INTERVAL_SECS)).await;
+        }
+    });
+
+    // Axum router
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
+    let app = Router::new()
+        .route("/api/balances", get(api::get_balances))
+        .route("/api/balances/deposit", post(api::deposit))
+        .route("/api/balances/withdraw", post(api::withdraw))
+        .route("/api/balances/reset", post(api::reset_balances))
+        .route("/api/trades", get(api::get_trades))
+        .route("/api/arbs", get(api::get_arbs))
+        .route("/api/stats", get(api::get_stats))
+        .route("/api/settings", get(api::get_settings).post(api::update_settings))
+        .route("/api/reset", post(api::full_reset))
+        .route("/ws", get(api::ws_handler))
+        .layer(cors)
+        .with_state(state);
+
+    let addr = "0.0.0.0:3401";
+    tracing::info!("Listening on http://{}", addr);
+    let listener = tokio::net::TcpListener::bind(addr).await.expect("failed to bind");
+    axum::serve(listener, app).await.expect("server failed");
+}

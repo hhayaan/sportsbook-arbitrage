@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+
+# Browser profiles and session data
+data/profiles/
+data/cookies/
+data/trades.db
+data/trades.db-journal
+
+# Rust build artifacts
+engine/target/
+
+# OS files
+.DS_Store
+Thumbs.db
