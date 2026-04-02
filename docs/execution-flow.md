@@ -63,9 +63,11 @@ Example with sigma=0.97, capital=$2.00:
 
 ## Execution Ordering
 
-FanDuel is placed first when it's one of the legs because it's a "soft book" — more likely to limit or reject bets from sharp bettors. If FD rejects, the other leg is never placed, avoiding one-sided exposure.
+Leg order: Pinnacle first -> FanDuel first -> DraftKings first.
 
-When neither leg is FanDuel (e.g., DK vs PIN), leg 1 ordering is determined by the engine's candidate structure.
+- **Pinnacle first** when it's one of the legs — the engine does a pre-flight quote to get `minRiskStake`/`maxRiskStake` from the venue. If the calculated stake is below minimum, it bumps it up and recalculates the other leg. If above maximum, it caps and recalculates. If the adjusted total exceeds `MAX_STAKE`, the arb is skipped entirely. No bets are placed until the quote passes.
+- **FanDuel first** when it's a FD+DK arb — FD is a soft book, more likely to reject. If FD rejects, DK is never placed.
+- **DraftKings** goes second in all cases.
 
 ## Deduplication
 

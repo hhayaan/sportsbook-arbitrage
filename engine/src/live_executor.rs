@@ -59,6 +59,18 @@ struct BalancesResponse {
     balances: Vec<BalanceEntry>,
 }
 
+#[derive(Deserialize, Debug)]
+struct QuoteResult {
+    #[serde(rename = "type")]
+    msg_type: Option<String>,
+    attempt_id: String,
+    status: String,
+    min_stake: Option<f64>,
+    max_stake: Option<f64>,
+    price: Option<f64>,
+    error_message: Option<String>,
+}
+
 /// Connect to the bet placer WebSocket server.
 pub async fn connect(url: &str) -> Result<(WsWriter, WsReader), String> {
     let (stream, _) = tokio_tungstenite::connect_async(url)
@@ -105,6 +117,61 @@ pub async fn fetch_balances(
             if let Ok(resp) = serde_json::from_str::<BalancesResponse>(&text) {
                 if resp.msg_type.as_deref() == Some("balances") {
                     return Ok(resp.balances.into_iter().map(|b| (b.venue, b.balance)).collect());
+                }
+            }
+        }
+    }
+}
+
+/// Pre-flight quote for Pinnacle — returns min/max stake and current price.
+pub async fn quote_leg(
+    writer: &WsWriter,
+    reader: &WsReader,
+    attempt_id: &str,
+    venue: &str,
+    venue_market_id: &str,
+) -> Result<(f64, f64, f64), String> {
+    let payload = serde_json::json!({
+        "type": "quote_bet",
+        "attempt_id": attempt_id,
+        "venue": venue,
+        "venue_market_id": venue_market_id,
+    }).to_string();
+
+    {
+        let mut w = writer.lock().await;
+        w.send(Message::Text(payload))
+            .await
+            .map_err(|e| format!("WS send failed: {}", e))?;
+    }
+
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("quote timeout".to_string());
+        }
+        let msg = {
+            let mut r = reader.lock().await;
+            match tokio::time::timeout(remaining, r.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => Some(text),
+                Ok(Some(Ok(_))) => continue,
+                Ok(Some(Err(e))) => return Err(format!("WS read error: {}", e)),
+                Ok(None) => return Err("WS connection closed".to_string()),
+                Err(_) => return Err("quote timeout".to_string()),
+            }
+        };
+        if let Some(text) = msg {
+            if let Ok(q) = serde_json::from_str::<QuoteResult>(&text) {
+                if q.msg_type.as_deref() == Some("quote_result") && q.attempt_id == attempt_id {
+                    if q.status != "ok" {
+                        return Err(format!("quote failed: {}", q.error_message.unwrap_or_default()));
+                    }
+                    return Ok((
+                        q.min_stake.unwrap_or(0.0),
+                        q.max_stake.unwrap_or(999999.0),
+                        q.price.unwrap_or(0.0),
+                    ));
                 }
             }
         }
@@ -273,10 +340,20 @@ pub async fn try_execute(
 
     let attempt_id = uuid::Uuid::new_v4().to_string();
 
-    // Determine soft book order: FanDuel first (soft), then DraftKings
-    let (first_venue, first_sel, first_stake, first_odds, first_mkt_id,
-         second_venue, second_sel, second_stake, second_odds, second_mkt_id) =
-        if candidate.leg1_venue == "fanduel" {
+    // Determine leg order: Pinnacle first (needs quote), then FD (soft book), then DK
+    let leg1_is_first = if candidate.leg1_venue == "pinnacle" {
+        true
+    } else if candidate.leg2_venue == "pinnacle" {
+        false
+    } else if candidate.leg1_venue == "fanduel" {
+        true
+    } else {
+        false
+    };
+
+    let (first_venue, first_sel, mut first_stake, first_odds, first_mkt_id,
+         second_venue, second_sel, mut second_stake, second_odds, second_mkt_id) =
+        if leg1_is_first {
             (&candidate.leg1_venue, &candidate.leg1_selection, plan.leg1_stake, candidate.leg1_odds, candidate.leg1_venue_market_id.clone(),
              &candidate.leg2_venue, &candidate.leg2_selection, plan.leg2_stake, candidate.leg2_odds, candidate.leg2_venue_market_id.clone())
         } else {
@@ -284,7 +361,64 @@ pub async fn try_execute(
              &candidate.leg1_venue, &candidate.leg1_selection, plan.leg1_stake, candidate.leg1_odds, candidate.leg1_venue_market_id.clone())
         };
 
-    // ── LEG 1 (soft book first) ──
+    // ── Pre-flight quote for Pinnacle leg ──
+    let has_pinnacle = first_venue == "pinnacle" || second_venue == "pinnacle";
+    if has_pinnacle {
+        let (pin_venue, pin_stake, pin_odds, pin_mkt_id, other_stake, other_odds) =
+            if first_venue == "pinnacle" {
+                (first_venue.as_str(), first_stake, first_odds, &first_mkt_id, second_stake, second_odds)
+            } else {
+                (second_venue.as_str(), second_stake, second_odds, &second_mkt_id, first_stake, first_odds)
+            };
+
+        match quote_leg(writer, reader, &format!("{}-Q", attempt_id), pin_venue, pin_mkt_id).await {
+            Ok((min_stake, max_stake, _quoted_price)) => {
+                let mut adj_pin = pin_stake;
+                let mut adj_other = other_stake;
+
+                // Bump up to minimum if needed
+                if adj_pin < min_stake {
+                    tracing::info!("[QUOTE] PIN stake ${:.2} below min ${:.2}, adjusting", adj_pin, min_stake);
+                    adj_pin = min_stake;
+                    // Recalculate other leg to maintain arb ratio
+                    adj_other = adj_pin * (1.0 / other_odds) / (1.0 / pin_odds);
+                    adj_other = (adj_other * 100.0).round() / 100.0;
+                }
+
+                // Cap at maximum if needed
+                if adj_pin > max_stake {
+                    tracing::info!("[QUOTE] PIN stake ${:.2} above max ${:.2}, adjusting", adj_pin, max_stake);
+                    adj_pin = max_stake;
+                    adj_other = adj_pin * (1.0 / other_odds) / (1.0 / pin_odds);
+                    adj_other = (adj_other * 100.0).round() / 100.0;
+                }
+
+                // Verify total still within user's max
+                if adj_pin > settings.max_stake || adj_other > settings.max_stake {
+                    tracing::info!("[QUOTE] Adjusted stakes exceed max_stake, skipping");
+                    return None;
+                }
+
+                // Apply adjusted stakes
+                if first_venue == "pinnacle" {
+                    first_stake = (adj_pin * 100.0).round() / 100.0;
+                    second_stake = adj_other;
+                } else {
+                    second_stake = (adj_pin * 100.0).round() / 100.0;
+                    first_stake = adj_other;
+                }
+
+                tracing::info!("[QUOTE] Adjusted stakes: {} ${:.2}, {} ${:.2}",
+                    first_venue, first_stake, second_venue, second_stake);
+            }
+            Err(e) => {
+                tracing::error!("[QUOTE] Failed: {}. Skipping arb.", e);
+                return None;
+            }
+        }
+    }
+
+    // ── LEG 1 ──
     tracing::info!(
         "LEG 1: {} ${:.2} on {} @ {:.3}",
         first_venue, first_stake, first_sel, first_odds

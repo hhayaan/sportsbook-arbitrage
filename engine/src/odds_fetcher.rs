@@ -779,6 +779,10 @@ async fn fetch_pinnacle(
                 None => continue,
             };
 
+            // Skip alternate lines — only use main markets
+            let is_alternate = mkt.get("isAlternate").and_then(|v| v.as_bool()).unwrap_or(false);
+            if is_alternate { continue; }
+
             let mtype = mkt.get("type").and_then(|v| v.as_str()).unwrap_or("");
             let market_type = match mtype {
                 "moneyline" => "moneyline",

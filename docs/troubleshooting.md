@@ -74,10 +74,13 @@
 **Cause**: Diff-based update only called `book.update()` for changed entries. Unchanged entries kept stale timestamps and expired after 30 seconds.
 **Fix**: Added `book.touch()` method that refreshes timestamps on unchanged entries without overwriting odds.
 
-### "BELOW_MIN_BET_AMOUNT" on Pinnacle (one-sided exposure)
-**Cause**: Pinnacle has a minimum stake of ~$0.81 CAD. When the engine's stake calculation falls below this, Pinnacle rejects the bet. Leg 1 is already placed with no hedge.
-**Status**: NOT YET FIXED. Need to enforce per-venue minimum stakes in the stake optimizer, or wire up the rescue hedger to auto-hedge.
-**Workaround**: Increase `FIXED_STAKE` to at least $1.00 so both legs clear all venue minimums.
+### "BELOW_MIN_BET_AMOUNT" on Pinnacle
+**Cause**: Pinnacle has per-market minimum stakes (varies, ~$0.81 CAD typical).
+**Fix**: Pre-flight quote system. The engine now quotes Pinnacle before placing any bets, gets the exact `minRiskStake`/`maxRiskStake`, and adjusts both legs' stakes to fit within limits while maintaining the arb ratio. If the adjusted total exceeds `MAX_STAKE`, the arb is skipped.
+
+### Pinnacle alternate lines creating fake arbs
+**Cause**: Pinnacle returns alternate spread/total lines (`isAlternate: true`) at different odds than the main line. These were being paired against FD/DK main lines, creating impossible 34-38% "arbs."
+**Fix**: `odds_fetcher.rs` now filters out `isAlternate: true` Pinnacle markets. Only main lines are imported.
 
 ### "failed to open sqlite db"
 **Cause**: `data/` directory doesn't exist relative to where the engine runs.

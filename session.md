@@ -180,10 +180,23 @@ The book dropped from ~12,000 entries to ~700 after the first scan cycle. The di
 
 **Fix**: Added `book.touch()` method that refreshes timestamps on unchanged entries without overwriting odds.
 
-### Pinnacle Minimum Stake Issue (Active Bug)
-Pinnacle has minimum bet amounts (~$0.81 CAD). When the engine calculates stakes below this minimum, the bet gets rejected with `BELOW_MIN_BET_AMOUNT`, leaving leg 1 placed with no hedge (one-sided exposure). The rescue hedger module exists in the codebase but is not wired up.
+### Pinnacle Minimum Stake Fix
+Pinnacle has per-market minimum bet amounts (~$0.81 CAD). The engine was calculating stakes below this, causing rejection and one-sided exposure.
 
-**Immediate concern**: Need to either enforce venue-specific minimum stakes in the stake optimizer, or wire up the rescue hedger to auto-hedge when leg 2 fails.
+**Fix**: Pre-flight quote system. Before placing any bets, the engine sends a `quote_bet` request to the bet placer for the Pinnacle leg. The quote returns `minRiskStake` and `maxRiskStake` from Pinnacle's API. The engine then:
+1. Bumps the Pinnacle stake up to the minimum if too low
+2. Caps at the maximum if too high
+3. Recalculates the other leg to maintain the correct arb ratio
+4. Verifies the adjusted total still fits within `MAX_STAKE`
+5. Only then places both legs
+
+### Leg Ordering Fix
+Changed from "FanDuel always first" to: Pinnacle first (needs pre-flight quote) -> FanDuel first (soft book) -> DraftKings. This ensures the quote check happens before any bets are placed.
+
+### Pinnacle Alternate Lines Filter
+NHL spread arbs were still showing 34-38% after the abs line fix. Root cause: Pinnacle returns alternate spread lines (`isAlternate: true`) at different odds than the main line. These were being paired against FD/DK main lines.
+
+**Fix**: Filter out `isAlternate: true` markets from Pinnacle. Only main lines are imported. Pinnacle's market count dropped from ~1,500 to ~750 per sport (alternates removed). Alternates can be re-enabled later if DK/FD alternate scanning is added.
 
 ---
 
@@ -191,10 +204,10 @@ Pinnacle has minimum bet amounts (~$0.81 CAD). When the engine calculates stakes
 
 | Issue | Status |
 |-------|--------|
-| **One-sided exposure on leg 2 failure** | **CRITICAL** — If leg 2 fails (e.g., below min stake), leg 1 is placed with no hedge. Rescue hedger exists but not wired up. Need to enforce venue min stakes or auto-hedge. |
+| **One-sided exposure on leg 2 failure** | Mitigated — Pinnacle pre-flight quote prevents min stake rejections. Still possible if DK/FD rejects for other reasons (session expired, market closed). Rescue hedger exists but not wired up. |
 | DK TLS on Windows | Mitigated via dk-proxy.js (using fetch) |
 | FD sessions expire ~13 min | Keepalive refreshes every 5 min, may still expire |
-| Pinnacle min stake ~$0.81 CAD | Engine can calculate stakes below this, causing rejection. Need per-venue min stake enforcement. |
+| DK/FD max stake limits unknown | Soft books may limit max bet amounts per user. Partner working on detection. |
 | NFL/NCAAF DK fetches fail | Offseason — expected, harmless warnings |
 | PIN MLB occasional 401 | Pinnacle sometimes returns Unauthorized for specific leagues. Retries next cycle. |
 
@@ -202,9 +215,9 @@ Pinnacle has minimum bet amounts (~$0.81 CAD). When the engine calculates stakes
 
 ## Future Roadmap
 
-### Immediate: One-Sided Exposure Fix
-- Enforce per-venue minimum stakes (PIN ~$0.81, FD ~$0.10, DK ~$0.10) in stake optimizer — reject arbs where either leg falls below venue minimum
-- OR wire up rescue hedger to auto-place a hedge bet on any venue when leg 2 fails after leg 1 fills
+### Immediate: DK/FD Limit Detection
+- Detect and handle DK/FD maximum stake limits (soft book user limiting)
+- Add pre-flight quote for DK/FD when their APIs support it
 
 ### Phase 1: Reliability & Recovery
 - **Odds changed** — re-fetch, recalculate, retry if still profitable

@@ -58,7 +58,7 @@ cd C:\dev\sports-arb-h2\engine; $env:LIVE_MODE="1"; $env:FIXED_STAKE="1"; $env:M
 - PIN: `{matchupId}:{marketKey}:{designation}` (e.g., `1627197304:s;0;m:home`)
 
 ## Execution Order
-FD first (soft book, more likely to reject) -> then DK or PIN. If leg 1 fails, leg 2 is never placed.
+Pinnacle first (pre-flight quote checks min/max stakes) -> FD first (soft book) -> DK. If leg 1 fails, leg 2 is never placed.
 
 ## Sports
 NBA, NHL, MLB, NFL, NCAAB, NCAAF, EPL, La Liga, Serie A, Bundesliga, Ligue 1, UCL, MLS, UFC
@@ -81,6 +81,7 @@ NBA, NHL, MLB, NFL, NCAAB, NCAAF, EPL, La Liga, Serie A, Bundesliga, Ligue 1, UC
 - Draw selections normalized to "draw" in team_names.rs, excluded from moneyline arbs in arb_detector.rs
 - 3-way soccer moneylines blocked via THREE_WAY_SPORTS in arb_detector.rs
 - Spread line_key uses absolute value to prevent same-side pairing
+- Pinnacle alternate lines filtered out (isAlternate) — no DK/FD alternates to pair against
 
 ## REST API (port 3401)
 ```powershell

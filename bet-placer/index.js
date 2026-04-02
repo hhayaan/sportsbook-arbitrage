@@ -95,6 +95,8 @@ async function main() {
 
       if (msg.type === "place_bet") {
         await handlePlaceBet(ws, msg);
+      } else if (msg.type === "quote_bet") {
+        await handleQuoteBet(ws, msg);
       } else if (msg.type === "get_balances") {
         await handleGetBalances(ws);
       } else if (msg.type === "ping") {
@@ -115,6 +117,52 @@ async function main() {
   });
 
   console.log(`\n[WS] Listening on ws://localhost:${WS_PORT}`);
+
+  // ── Handle quote_bet request (Pinnacle only) ──
+  async function handleQuoteBet(ws, cmd) {
+    const { attempt_id, venue, venue_market_id } = cmd;
+    console.log(`[QUOTE] ${venue} | ${venue_market_id}`);
+
+    if (venue !== "pinnacle") {
+      ws.send(JSON.stringify({ type: "quote_result", attempt_id, status: "ok", min_stake: 0, max_stake: 999999, price: 0 }));
+      return;
+    }
+
+    const adapter = adapters[venue];
+    if (!adapter) {
+      ws.send(JSON.stringify({ type: "quote_result", attempt_id, status: "error", error_message: `Unknown venue: ${venue}` }));
+      return;
+    }
+
+    try {
+      const parts = venue_market_id.split(":");
+      const matchupId = parseInt(parts[0]);
+      const marketKey = parts.slice(1, -1).join(":");
+      const designation = parts[parts.length - 1];
+
+      const quoteResp = await adapter._apiRequest("https://api.arcadia.pinnacle.com/0.1/bets/straight/quote", {
+        method: "POST",
+        body: { oddsFormat: "american", selections: [{ matchupId, marketKey, designation, price: 0 }] },
+      });
+
+      if (quoteResp.status !== 200) throw new Error(`quote failed (${quoteResp.status}): ${quoteResp.body}`);
+      const quote = quoteResp.json();
+      const sel = quote.selections?.[0];
+      if (!sel) throw new Error("No selection in quote");
+
+      const limits = quote.limits || [];
+      const minStake = limits.find(l => l.type === "minRiskStake")?.amount || 0;
+      const maxStake = limits.find(l => l.type === "maxRiskStake")?.amount || 999999;
+      const price = sel.price;
+      const decimal = price > 0 ? 1 + price / 100 : 1 + 100 / Math.abs(price);
+
+      console.log(`[QUOTE] PIN min=$${minStake} max=$${maxStake} price=${price} (${decimal.toFixed(3)})`);
+      ws.send(JSON.stringify({ type: "quote_result", attempt_id, status: "ok", min_stake: minStake, max_stake: maxStake, price: decimal }));
+    } catch (err) {
+      console.error(`[QUOTE] ${venue} failed: ${err.message}`);
+      ws.send(JSON.stringify({ type: "quote_result", attempt_id, status: "error", error_message: err.message }));
+    }
+  }
 
   // ── Handle get_balances request ──
   async function handleGetBalances(ws) {
