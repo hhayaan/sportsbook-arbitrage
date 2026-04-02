@@ -9,11 +9,13 @@ pub struct CanonicalMarket {
     pub sport: String,
     pub league: String,
     pub start_time_utc: String,
-    pub market_type: String, // moneyline | spread | total | team_total
+    pub market_type: String, // moneyline | spread | total | team_total | player_prop | alt_spread | alt_total
     pub selection: String,
     pub line: Option<f64>,
     pub period: String,
     pub is_live: bool,
+    pub player_name: Option<String>,
+    pub prop_type: Option<String>,
     pub decimal_odds: f64,
     pub american_odds: Option<f64>,
     pub venue: String,
@@ -31,13 +33,27 @@ pub struct MarketIdentityKey {
     pub line_key: String,
     pub period: String,
     pub is_live: bool,
+    pub player_key: String,
 }
 
 impl MarketIdentityKey {
     pub fn from_market(m: &CanonicalMarket) -> Self {
         let line_key = match m.line {
-            Some(l) => format!("{:.1}", l),
+            Some(l) => {
+                // For spreads, use absolute value so both sides (+1.5 and -1.5)
+                // group together. Otherwise same-side bets from different venues
+                // get paired as if they're opposite sides.
+                if m.market_type == "spread" || m.market_type == "alt_spread" {
+                    format!("{:.1}", l.abs())
+                } else {
+                    format!("{:.1}", l)
+                }
+            }
             None => "null".to_string(),
+        };
+        let player_key = match (&m.player_name, &m.prop_type) {
+            (Some(name), Some(prop)) => format!("{}:{}", name, prop),
+            _ => String::new(),
         };
         MarketIdentityKey {
             event_id: m.event_id.clone(),
@@ -45,6 +61,7 @@ impl MarketIdentityKey {
             line_key,
             period: m.period.clone(),
             is_live: m.is_live,
+            player_key,
         }
     }
 }
@@ -112,6 +129,20 @@ impl Book {
             .entry(identity)
             .or_default()
             .insert(vs_key, entry);
+    }
+
+    /// Refresh timestamp on an existing entry without changing odds.
+    pub fn touch(&mut self, market: &CanonicalMarket) {
+        let identity = MarketIdentityKey::from_market(market);
+        let vs_key = VenueSelectionKey {
+            venue: market.venue.clone(),
+            selection: market.selection.clone(),
+        };
+        if let Some(inner) = self.entries.get_mut(&identity) {
+            if let Some(entry) = inner.get_mut(&vs_key) {
+                entry.received_at_ms = market.received_at_ms;
+            }
+        }
     }
 
     pub fn expire(&mut self, now_ms: u64) {

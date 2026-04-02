@@ -126,7 +126,7 @@ pub fn sports() -> Vec<SportConfig> {
 pub const DK_HOSTNAME: &str = "sportsbook-nash.draftkings.com";
 pub const DK_SITE_CODE: &str = "CA-ON-SB";
 
-pub const FD_STATES: &[&str] = &["nj", "mi"];
+pub const FD_STATES: &[&str] = &["on"]; // Ontario, Canada
 pub const FD_API_KEY: &str = "FhMFpcPWXMeyZxOx";
 
 pub const PIN_DOMAIN: &str = "guest.api.arcadia.pinnacle.com";

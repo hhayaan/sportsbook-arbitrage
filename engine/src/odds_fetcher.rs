@@ -55,7 +55,7 @@ pub async fn fetch_all(client: &Client) -> Vec<CanonicalMarket> {
             handles.push(tokio::spawn(async move {
                 match fetch_draftkings(&c, name, dk_id).await {
                     Ok(markets) => {
-                        tracing::info!("[DK] {} → {} markets", name, markets.len());
+                        tracing::info!("[DK]    {:<10} → {} markets", name, markets.len());
                         markets
                     }
                     Err(e) => {
@@ -73,7 +73,7 @@ pub async fn fetch_all(client: &Client) -> Vec<CanonicalMarket> {
             handles.push(tokio::spawn(async move {
                 match fetch_fanduel(&c, name, page).await {
                     Ok(markets) => {
-                        tracing::info!("[FD] {} → {} markets", name, markets.len());
+                        tracing::info!("[FD]    {:<10} → {} markets", name, markets.len());
                         markets
                     }
                     Err(e) => {
@@ -88,7 +88,7 @@ pub async fn fetch_all(client: &Client) -> Vec<CanonicalMarket> {
             handles.push(tokio::spawn(async move {
                 match fetch_fanduel_by_event_type(&c, name, event_type_id).await {
                     Ok(markets) => {
-                        tracing::info!("[FD-ET] {} → {} markets", name, markets.len());
+                        tracing::info!("[FD-ET] {:<10} → {} markets", name, markets.len());
                         markets
                     }
                     Err(e) => {
@@ -106,7 +106,7 @@ pub async fn fetch_all(client: &Client) -> Vec<CanonicalMarket> {
             handles.push(tokio::spawn(async move {
                 match fetch_pinnacle(&c, name, league_id).await {
                     Ok(markets) => {
-                        tracing::info!("[PIN] {} → {} markets", name, markets.len());
+                        tracing::info!("[PIN]   {:<10} → {} markets", name, markets.len());
                         markets
                     }
                     Err(e) => {
@@ -284,10 +284,12 @@ async fn fetch_dk_inner(
                     line,
                     period: detect_period(mkt_name).to_string(),
                     is_live,
+                    player_name: None,
+                    prop_type: None,
                     decimal_odds: decimal,
                     american_odds: american,
                     venue: "draftkings".to_string(),
-                    venue_market_id: sel_id.to_string(), // Adapter-ready: "0ML84048103_3"
+                    venue_market_id: sel_id.to_string(),
                     venue_event_id: eid_str.replace('"', ""),
                     received_at_ms: ts,
                 });
@@ -372,10 +374,12 @@ fn parse_dk_offer(
                 line,
                 period: detect_period(label).to_string(),
                 is_live,
+                player_name: None,
+                prop_type: None,
                 decimal_odds: decimal,
                 american_odds: odds_american,
                 venue: "draftkings".to_string(),
-                venue_market_id: format!("dk:{}:{}", offer_id, selection), // TODO: needs proper selection ID from sportscontent API
+                venue_market_id: format!("dk:{}:{}", offer_id, selection),
                 venue_event_id: format!("dk:{}", event_id_num),
                 received_at_ms: ts,
             });
@@ -422,7 +426,7 @@ async fn fetch_fanduel(
     // Try multiple states with CUSTOM page type
     for state in config::FD_STATES {
         let url = format!(
-            "https://sbapi.{}.sportsbook.fanduel.com/api/content-managed-page?page=CUSTOM&customPageId={}&_ak={}",
+            "https://sbapi.{}.sportsbook.fanduel.ca/api/content-managed-page?page=CUSTOM&customPageId={}&_ak={}",
             state, page, config::FD_API_KEY
         );
 
@@ -467,7 +471,7 @@ async fn fetch_fanduel_by_event_type(
 ) -> Result<Vec<CanonicalMarket>, String> {
     for state in config::FD_STATES {
         let url = format!(
-            "https://sbapi.{}.sportsbook.fanduel.com/api/content-managed-page?page=SPORT&eventTypeId={}&_ak={}",
+            "https://sbapi.{}.sportsbook.fanduel.ca/api/content-managed-page?page=SPORT&eventTypeId={}&_ak={}",
             state, event_type_id, config::FD_API_KEY
         );
 
@@ -631,10 +635,12 @@ fn out_push_fd(
         line,
         period: period.to_string(),
         is_live,
+        player_name: None,
+        prop_type: None,
         decimal_odds: decimal,
         american_odds: american,
         venue: "fanduel".to_string(),
-        venue_market_id: adapter_sel_id.to_string(), // "marketId:selectionId" — adapter-ready
+        venue_market_id: adapter_sel_id.to_string(),
         venue_event_id: adapter_sel_id.to_string(),
         received_at_ms: ts,
     });
@@ -825,6 +831,8 @@ async fn fetch_pinnacle(
                         line: points,
                         period: period_str.to_string(),
                         is_live: info.is_live,
+                        player_name: None,
+                        prop_type: None,
                         decimal_odds: decimal,
                         american_odds: Some(american_odds),
                         venue: "pinnacle".to_string(),

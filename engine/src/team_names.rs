@@ -312,19 +312,24 @@ pub fn canonical_event_id(sport: &str, away: &str, home: &str, start_time: &str)
     let home_code = normalize_team(home, sport);
 
     // ALWAYS sort team codes alphabetically so "BOS-vs-NYK" == "NYK-vs-BOS"
-    // This ensures different venues produce the same event ID regardless of home/away ordering
     let (team_a, team_b) = if away_code <= home_code {
         (away_code, home_code)
     } else {
         (home_code, away_code)
     };
 
-    // Extract date from ISO 8601 start time (e.g., "2026-03-15T19:30:00Z" → "2026-03-15")
     let date = extract_date(start_time);
 
     match date {
         Some(d) => format!("{}:{}:{}-vs-{}", sport, d, team_a, team_b),
-        None => format!("{}:{}-vs-{}", sport, team_a, team_b),
+        None => {
+            // Hash fallback to prevent different games from colliding
+            let hash: String = start_time.chars()
+                .filter(|c| c.is_alphanumeric())
+                .take(12)
+                .collect();
+            format!("{}:{}:{}-vs-{}", sport, hash, team_a, team_b)
+        }
     }
 }
 
@@ -354,12 +359,106 @@ pub fn normalize_selection(market_type: &str, raw: &str, sport: &str) -> String 
 }
 
 fn extract_date(s: &str) -> Option<String> {
-    // Handle "2026-03-15T19:30:00Z" or "2026-03-15T19:30:00-04:00"
+    // ISO 8601: "2026-03-15T19:30:00Z" → "2026-03-15"
     if s.len() >= 10 && s.as_bytes().get(4) == Some(&b'-') && s.as_bytes().get(7) == Some(&b'-') {
-        Some(s[..10].to_string())
-    } else {
-        None
+        return Some(s[..10].to_string());
     }
+    // Epoch milliseconds: "1711756200000" → date
+    if let Ok(epoch_ms) = s.parse::<i64>() {
+        let secs = if epoch_ms > 1_000_000_000_000 { epoch_ms / 1000 } else { epoch_ms };
+        if let Some(dt) = chrono::DateTime::from_timestamp(secs, 0) {
+            return Some(dt.format("%Y-%m-%d").to_string());
+        }
+    }
+    None
+}
+
+/// Normalize a player name for cross-venue matching.
+/// "Luka Doncic" / "L. Doncic" / "Doncic, Luka" → "doncic"
+pub fn normalize_player(raw: &str) -> String {
+    let cleaned = raw.trim().to_lowercase()
+        .replace(".", "")
+        .replace("'", "")
+        .replace("'", "")
+        .replace("-", " ");
+
+    if cleaned.contains(',') {
+        let parts: Vec<&str> = cleaned.splitn(2, ',').collect();
+        return parts[0].trim().to_string();
+    }
+
+    let words: Vec<&str> = cleaned.split_whitespace().collect();
+    if words.len() >= 2 {
+        return words[words.len() - 1].to_string();
+    }
+
+    cleaned
+}
+
+/// Extract prop type from market name.
+/// "Luka Doncic Total Points" → ("doncic", "points")
+pub fn parse_player_prop(market_name: &str) -> Option<(String, String)> {
+    let lower = market_name.to_lowercase();
+
+    let prop_type = if lower.contains("points") && lower.contains("reb") && lower.contains("ast") {
+        "pra"
+    } else if lower.contains("points") && lower.contains("reb") {
+        "pr"
+    } else if lower.contains("points") && lower.contains("ast") {
+        "pa"
+    } else if lower.contains("reb") && lower.contains("ast") {
+        "ra"
+    } else if lower.contains("3 point") || lower.contains("three point") || lower.contains("3pt") || lower.contains("threes") {
+        "threes"
+    } else if lower.contains("points") || lower.contains("pts") {
+        "points"
+    } else if lower.contains("rebound") || lower.contains("reb") {
+        "rebounds"
+    } else if lower.contains("assist") || lower.contains("ast") {
+        "assists"
+    } else if lower.contains("steal") {
+        "steals"
+    } else if lower.contains("block") {
+        "blocks"
+    } else if lower.contains("turnover") {
+        "turnovers"
+    } else if lower.contains("strikeout") || lower.contains("k's") {
+        "strikeouts"
+    } else if lower.contains("hits allowed") {
+        "hits_allowed"
+    } else if lower.contains("total bases") {
+        "total_bases"
+    } else if lower.contains("rushing yard") {
+        "rush_yds"
+    } else if lower.contains("passing yard") {
+        "pass_yds"
+    } else if lower.contains("receiving yard") {
+        "rec_yds"
+    } else if lower.contains("touchdown") {
+        "touchdowns"
+    } else if lower.contains("shot") && lower.contains("goal") {
+        "sog"
+    } else if lower.contains("save") {
+        "saves"
+    } else if lower.contains("goal") {
+        "goals"
+    } else {
+        return None;
+    };
+
+    let name_part = lower
+        .split(" total ")
+        .next()
+        .or_else(|| lower.split(" to ").next())
+        .or_else(|| lower.split(" - ").next())
+        .unwrap_or(&lower);
+
+    let player = normalize_player(name_part);
+    if player.len() < 2 {
+        return None;
+    }
+
+    Some((player, prop_type.to_string()))
 }
 
 #[cfg(test)]

@@ -105,7 +105,7 @@ async fn main() {
                         Ok(balances) => {
                             for (venue, balance) in &balances {
                                 poll_db.update_balance(venue, *balance);
-                                tracing::info!("[BALANCE] {} = ${:.2} (live)", venue, balance);
+                                tracing::info!("[BALANCE] {:<10} = ${:.2} (live)", venue, balance);
                             }
                             let db_balances = poll_db.get_balances();
                             let _ = poll_ws.send(models::WsEvent::BalanceUpdated { balances: db_balances });
@@ -174,6 +174,8 @@ async fn main() {
                     market_hashes.insert(diff_key, hash);
                     changed += 1;
                 } else {
+                    // Odds unchanged — still refresh the timestamp so expiry doesn't kill it
+                    book.touch(m);
                     unchanged += 1;
                 }
 
@@ -249,7 +251,7 @@ async fn main() {
                 let _ = poll_ws.send(models::WsEvent::ArbDetected { arb: arb_opp });
 
                 tracing::info!(
-                    "[ARB] {:.2}% | {} {} | {}@{:.3} ({}) vs {}@{:.3} ({})",
+                    "[ARB] {:>5.2}% | {:<5} {:<10} | {}@{:.3} ({}) vs {}@{:.3} ({})",
                     candidate.arb_pct * 100.0,
                     candidate.sport,
                     candidate.market_type,

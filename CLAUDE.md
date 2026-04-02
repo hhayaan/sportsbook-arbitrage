@@ -72,12 +72,15 @@ NBA, NHL, MLB, NFL, NCAAB, NCAAF, EPL, La Liga, Serie A, Bundesliga, Ligue 1, UC
 - Region: Ontario (CA-ON)
 
 ## Known Issues
+- **ONE-SIDED EXPOSURE**: If leg 2 fails after leg 1 fills, you have an unhedged bet. Rescue hedger exists but not wired up. Need per-venue min stake enforcement.
 - DK TLS on Windows -> use dk-proxy.js (uses fetch, not https.get)
 - FD sessions expire ~13 min, keepalive refreshes every 5 min
 - True DK-FD arbs are rare; most arbs involve Pinnacle
 - NFL/NCAAF DK fetches fail in offseason (harmless)
+- Pinnacle min stake ~$0.81 CAD — stakes below this get rejected
 - Draw selections normalized to "draw" in team_names.rs, excluded from moneyline arbs in arb_detector.rs
-- FD_STATES config still set to ["nj", "mi"] — should be ["on"] for Ontario (pending V3 merge)
+- 3-way soccer moneylines blocked via THREE_WAY_SPORTS in arb_detector.rs
+- Spread line_key uses absolute value to prevent same-side pairing
 
 ## REST API (port 3401)
 ```powershell

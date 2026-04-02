@@ -159,15 +159,31 @@ DK was showing XPP (DraftKings Crowns) balance alongside CAD. Filtered out — X
 ### Pinnacle Token Fix
 Initial Pinnacle adapter couldn't find session tokens — was scanning all localStorage keys. Fixed to read directly from `localStorage["Main:User"]` which contains `token` and `deviceId`.
 
-### Partner's V3 Engine Improvements (Not Yet Merged)
-Partner updated the V3 engine with improvements we should adopt:
-- **3-way moneyline sport blocking** — identifies soccer sports by name and skips ALL 2-leg moneyline arbs (better than our draw exclusion)
-- **Time-to-start filter** — rejects events >12h away (capital lockup) and <2min from start (suspension risk)
-- **Suspicious arb warning** — warns on >15% arbs (likely data mismatches)
-- **Post-substitution sigma revalidation** — re-checks arb after venue swap
-- **Player prop support** — new market category with player name normalization
-- **Epoch date parsing** — prevents silent date-parsing failures
-- **FD_STATES corrected** — changed from `["nj", "mi"]` to `["on"]` for Ontario
+### V3 Engine Merge (Completed)
+Merged the following from partner's V3 engine:
+- **3-way moneyline sport blocking** — `THREE_WAY_SPORTS` list blocks all 2-leg soccer moneyline arbs (EPL, La Liga, Serie A, Bundesliga, Ligue 1, UCL, MLS)
+- **Player prop data model** — `player_name`, `prop_type` fields on CanonicalMarket, `player_key` on MarketIdentityKey
+- **Player prop parsing** — `normalize_player()`, `parse_player_prop()` in team_names.rs
+- **Epoch date parsing** — `extract_date()` handles epoch milliseconds
+- **Hash fallback** — `canonical_event_id()` uses hash when date can't be parsed
+- **FD_STATES fixed** — changed from `["nj", "mi"]` to `["on"]` for Ontario
+- **Alt market types** — `alt_total`, `alt_spread`, `player_prop` added to arb detector
+- **FD URL fix** — changed `.com` to `.ca` for Ontario API endpoints
+
+### Spread Line Matching Bug (Critical)
+NHL spread arbs were showing 34-38% — impossible for real arbs. Root cause: spread markets have signed lines (+1.5 for underdog, -1.5 for favorite). The `MarketIdentityKey` grouped by signed line, so same-side bets from different venues were in separate groups and paired as if complementary.
+
+**Fix**: `line_key` now uses absolute value for spread markets: `format!("{:.1}", l.abs())`. Both sides group together, and the complementarity check correctly pairs favorite vs underdog.
+
+### Book Expiry Bug
+The book dropped from ~12,000 entries to ~700 after the first scan cycle. The diff-based update system only called `book.update()` for changed entries. Unchanged entries kept stale timestamps and expired after 30 seconds.
+
+**Fix**: Added `book.touch()` method that refreshes timestamps on unchanged entries without overwriting odds.
+
+### Pinnacle Minimum Stake Issue (Active Bug)
+Pinnacle has minimum bet amounts (~$0.81 CAD). When the engine calculates stakes below this minimum, the bet gets rejected with `BELOW_MIN_BET_AMOUNT`, leaving leg 1 placed with no hedge (one-sided exposure). The rescue hedger module exists in the codebase but is not wired up.
+
+**Immediate concern**: Need to either enforce venue-specific minimum stakes in the stake optimizer, or wire up the rescue hedger to auto-hedge when leg 2 fails.
 
 ---
 
@@ -175,27 +191,20 @@ Partner updated the V3 engine with improvements we should adopt:
 
 | Issue | Status |
 |-------|--------|
+| **One-sided exposure on leg 2 failure** | **CRITICAL** — If leg 2 fails (e.g., below min stake), leg 1 is placed with no hedge. Rescue hedger exists but not wired up. Need to enforce venue min stakes or auto-hedge. |
 | DK TLS on Windows | Mitigated via dk-proxy.js (using fetch) |
 | FD sessions expire ~13 min | Keepalive refreshes every 5 min, may still expire |
-| Pinnacle session token extraction | Working via `localStorage["Main:User"]` |
-| Paper trades are unrealistic | Paper executor does instant fills at exact odds — only useful for arb detection testing |
-| 3-way moneyline arbs | Partially fixed (draw exclusion). V3 has a more robust sport-level blocking approach to merge |
-| No time-to-start filter | Events far in the future can lock up capital. V3 fix available to merge |
-| No suspicious arb warning | Very high % arbs (likely data errors) not flagged. V3 fix available to merge |
-| FD_STATES still set to US | Config has `["nj", "mi"]` instead of `["on"]` for Ontario. V3 fix available |
+| Pinnacle min stake ~$0.81 CAD | Engine can calculate stakes below this, causing rejection. Need per-venue min stake enforcement. |
 | NFL/NCAAF DK fetches fail | Offseason — expected, harmless warnings |
+| PIN MLB occasional 401 | Pinnacle sometimes returns Unauthorized for specific leagues. Retries next cycle. |
 
 ---
 
 ## Future Roadmap
 
-### Immediate: Merge Partner's V3 Improvements
-- Adopt 3-way moneyline sport blocking from V3's `arb_detector.rs`
-- Adopt time-to-start filter (>12h and <2min rejection)
-- Adopt suspicious arb warning (>15% threshold)
-- Fix FD_STATES from `["nj", "mi"]` to `["on"]`
-- Add player prop data model fields
-- Add epoch date parsing to `team_names.rs`
+### Immediate: One-Sided Exposure Fix
+- Enforce per-venue minimum stakes (PIN ~$0.81, FD ~$0.10, DK ~$0.10) in stake optimizer — reject arbs where either leg falls below venue minimum
+- OR wire up rescue hedger to auto-place a hedge bet on any venue when leg 2 fails after leg 1 fills
 
 ### Phase 1: Reliability & Recovery
 - **Odds changed** — re-fetch, recalculate, retry if still profitable

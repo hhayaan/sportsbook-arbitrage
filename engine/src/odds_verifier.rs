@@ -35,6 +35,7 @@ pub fn verify_leg(
         line_key,
         period: candidate.period.clone(),
         is_live: candidate.is_live,
+        player_key: String::new(),
     };
 
     let entries = book.get_entries(&identity_key).ok_or_else(|| {

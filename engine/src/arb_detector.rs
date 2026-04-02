@@ -1,5 +1,8 @@
 use crate::models::*;
 
+/// Sports with 3-way moneyline (home/draw/away). 2-leg arbs are INVALID for these.
+const THREE_WAY_SPORTS: &[&str] = &["SOCCER", "EPL", "LA_LIGA", "SERIE_A", "BUNDESLIGA", "LIGUE_1", "UCL", "MLS"];
+
 pub fn detect_arbs(book: &Book, now_ms: u64, max_data_age_ms: u64, require_pinnacle_leg: bool) -> Vec<ArbCandidate> {
     let mut candidates = Vec::new();
 
@@ -20,6 +23,15 @@ pub fn detect_arbs(book: &Book, now_ms: u64, max_data_age_ms: u64, require_pinna
 
         let selections: Vec<String> = by_selection.keys().cloned().collect();
         if selections.len() < 2 {
+            continue;
+        }
+
+        // Block 3-way moneyline arbs for soccer sports.
+        // Soccer moneylines have 3 outcomes (home/draw/away). A 2-leg arb
+        // only covers 2 of 3 outcomes — the third outcome loses both bets.
+        let sport_upper = key.event_id.split(':').next().unwrap_or("");
+        let is_three_way_sport = THREE_WAY_SPORTS.iter().any(|&s| s == sport_upper);
+        if is_three_way_sport && key.market_type == "moneyline" {
             continue;
         }
 
@@ -113,10 +125,10 @@ pub fn detect_arbs(book: &Book, now_ms: u64, max_data_age_ms: u64, require_pinna
 fn are_selections_complementary(market_type: &str, sel_a: &str, sel_b: &str) -> bool {
     match market_type {
         "moneyline" => sel_a != sel_b && sel_a != "draw" && sel_b != "draw",
-        "total" | "team_total" => {
+        "total" | "team_total" | "alt_total" | "player_prop" => {
             (sel_a == "over" && sel_b == "under") || (sel_a == "under" && sel_b == "over")
         }
-        "spread" => sel_a != sel_b,
+        "spread" | "alt_spread" => sel_a != sel_b,
         _ => false,
     }
 }

@@ -66,6 +66,19 @@
 1. `team_names.rs` — `normalize_selection()` now catches "Draw", "The Draw", "Tie" and normalizes them to lowercase `"draw"` before they reach the team name normalizer (which would turn them into `"DRAW"` or `"DRA"`).
 2. `arb_detector.rs` — `are_selections_complementary()` excludes `"draw"` from moneyline pairing. Only team-vs-team pairs are valid 2-way arbs.
 
+### 34-38% NHL spread arbs (fake arbs)
+**Cause**: Spread markets have signed lines (+1.5 underdog, -1.5 favorite). The `MarketIdentityKey` grouped by signed `line_key`, so same-side bets from different venues ended up in separate groups. The arb detector saw different team names and paired them as if complementary — but they were the same side of the same spread.
+**Fix**: `models.rs` — `line_key` now uses `l.abs()` for spread markets, grouping both sides together. The complementarity check then correctly pairs favorite vs underdog.
+
+### Book drops from ~12,000 to ~700 entries after first scan
+**Cause**: Diff-based update only called `book.update()` for changed entries. Unchanged entries kept stale timestamps and expired after 30 seconds.
+**Fix**: Added `book.touch()` method that refreshes timestamps on unchanged entries without overwriting odds.
+
+### "BELOW_MIN_BET_AMOUNT" on Pinnacle (one-sided exposure)
+**Cause**: Pinnacle has a minimum stake of ~$0.81 CAD. When the engine's stake calculation falls below this, Pinnacle rejects the bet. Leg 1 is already placed with no hedge.
+**Status**: NOT YET FIXED. Need to enforce per-venue minimum stakes in the stake optimizer, or wire up the rescue hedger to auto-hedge.
+**Workaround**: Increase `FIXED_STAKE` to at least $1.00 so both legs clear all venue minimums.
+
 ### "failed to open sqlite db"
 **Cause**: `data/` directory doesn't exist relative to where the engine runs.
 **Fix**: `mkdir C:\dev\sports-arb-h2\engine\data`
