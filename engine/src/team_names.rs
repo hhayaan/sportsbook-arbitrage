@@ -343,7 +343,13 @@ pub fn normalize_selection(market_type: &str, raw: &str, sport: &str) -> String 
                 normalize_team(raw, sport)
             }
         }
-        _ => normalize_team(raw, sport),
+        _ => {
+            let lower = raw.trim().to_lowercase();
+            if lower == "draw" || lower == "the draw" || lower == "tie" {
+                return "draw".to_string();
+            }
+            normalize_team(raw, sport)
+        }
     }
 }
 

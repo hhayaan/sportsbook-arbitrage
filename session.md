@@ -136,21 +136,66 @@ Successfully placed live arb bets:
 
 ---
 
+## Post-Launch Fixes
+
+### Draw/3-Way Moneyline Bug (Critical)
+The engine was detecting 40-70% "arbs" on soccer moneylines that were actually pairing a team win with a draw. Soccer moneylines are 3-way (home/draw/away) — a 2-leg arb only covers 2 of 3 outcomes, leaving the third unhedged (100% loss).
+
+**Root cause**: The team name normalizer (`team_names.rs`) turned "Draw" into `"DRAW"` (uppercased), but the arb detector checked for lowercase `"draw"`.
+
+**Two-layer fix**:
+1. `team_names.rs` — `normalize_selection()` now catches "Draw"/"The Draw"/"Tie" and returns consistent lowercase `"draw"` before they reach the team normalizer
+2. `arb_detector.rs` — `are_selections_complementary()` excludes `"draw"` from moneyline pairing
+
+### DK Proxy Fix
+The original dk-proxy.js used Node's `https.get` which had the same TLS issue as Rust's reqwest. Rewrote to use `fetch()` which handles DK's TLS correctly.
+
+### FanDuel Currency Fix
+FD balance was showing "USD" instead of "CAD". Hardcoded to CAD for Ontario region.
+
+### DK XPP (Crowns) Filter
+DK was showing XPP (DraftKings Crowns) balance alongside CAD. Filtered out — XPP is not real currency.
+
+### Pinnacle Token Fix
+Initial Pinnacle adapter couldn't find session tokens — was scanning all localStorage keys. Fixed to read directly from `localStorage["Main:User"]` which contains `token` and `deviceId`.
+
+### Partner's V3 Engine Improvements (Not Yet Merged)
+Partner updated the V3 engine with improvements we should adopt:
+- **3-way moneyline sport blocking** — identifies soccer sports by name and skips ALL 2-leg moneyline arbs (better than our draw exclusion)
+- **Time-to-start filter** — rejects events >12h away (capital lockup) and <2min from start (suspension risk)
+- **Suspicious arb warning** — warns on >15% arbs (likely data mismatches)
+- **Post-substitution sigma revalidation** — re-checks arb after venue swap
+- **Player prop support** — new market category with player name normalization
+- **Epoch date parsing** — prevents silent date-parsing failures
+- **FD_STATES corrected** — changed from `["nj", "mi"]` to `["on"]` for Ontario
+
+---
+
 ## Known Issues
 
 | Issue | Status |
 |-------|--------|
-| DK TLS on Windows | Mitigated via dk-proxy.js |
+| DK TLS on Windows | Mitigated via dk-proxy.js (using fetch) |
 | FD sessions expire ~13 min | Keepalive refreshes every 5 min, may still expire |
 | Pinnacle session token extraction | Working via `localStorage["Main:User"]` |
 | Paper trades are unrealistic | Paper executor does instant fills at exact odds — only useful for arb detection testing |
-| FD XPP (DK Crowns) showing in balance | Fixed: filtered out in DK adapter |
-| FD balance shows "USD" instead of "CAD" | Fixed: hardcoded to CAD for Ontario |
+| 3-way moneyline arbs | Partially fixed (draw exclusion). V3 has a more robust sport-level blocking approach to merge |
+| No time-to-start filter | Events far in the future can lock up capital. V3 fix available to merge |
+| No suspicious arb warning | Very high % arbs (likely data errors) not flagged. V3 fix available to merge |
+| FD_STATES still set to US | Config has `["nj", "mi"]` instead of `["on"]` for Ontario. V3 fix available |
 | NFL/NCAAF DK fetches fail | Offseason — expected, harmless warnings |
 
 ---
 
 ## Future Roadmap
+
+### Immediate: Merge Partner's V3 Improvements
+- Adopt 3-way moneyline sport blocking from V3's `arb_detector.rs`
+- Adopt time-to-start filter (>12h and <2min rejection)
+- Adopt suspicious arb warning (>15% threshold)
+- Fix FD_STATES from `["nj", "mi"]` to `["on"]`
+- Add player prop data model fields
+- Add epoch date parsing to `team_names.rs`
 
 ### Phase 1: Reliability & Recovery
 - **Odds changed** — re-fetch, recalculate, retry if still profitable
@@ -175,6 +220,7 @@ Each needs: HAR capture, API reverse engineering, adapter implementation, regist
 - Kelly criterion stake sizing
 - Bet history logging and P&L tracking
 - Auto-retry on transient failures
+- Player prop arb detection
 
 ### Phase 4: Infrastructure
 - Deploy engine to cloud (AWS/GCP) for 24/7 operation

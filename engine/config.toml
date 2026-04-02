@@ -1,0 +1,58 @@
+[strategy]
+require_pinnacle_leg = false   # Only FD + DK for now
+
+[policy]
+min_identity_confidence = 0.95
+max_data_age_ms = 60000
+min_seconds_to_start = 60
+min_stake = 0.10               # Low min for testing
+min_profit = 0.01              # Low min for testing
+max_rescue_loss = 25.0
+max_event_exposure = 500.0
+max_stake_pct = 0.20
+dedup_cooldown_secs = 60
+live_dedup_cooldown_secs = 15
+max_odds_drift = 0.03
+source_health_threshold_ms = 30000
+
+[paper_trading]
+enabled = false                 # LIVE MODE
+random_seed = 42
+fill_rate = 0.85
+partial_fill_rate = 0.10
+odds_drift_rate = 0.15
+rejection_rate = 0.05
+min_latency_ms = 500
+max_latency_ms = 2000
+
+[circuit_breaker]
+loss_threshold = 50.0
+loss_window_secs = 1800
+rejection_threshold = 0.50
+rejection_window = 10
+cooldown_secs = 300
+
+[concurrency]
+max_concurrent_arbs = 3
+enabled = false
+
+[venues.draftkings]
+mode = "live"
+initial_balance = 1000.00
+max_stake = 1.00               # $1 max for testing
+min_stake = 0.10
+max_bets_per_hour = 10
+
+[venues.fanduel]
+mode = "live"
+initial_balance = 1000.00
+max_stake = 1.00               # $1 max for testing
+min_stake = 0.10
+max_bets_per_hour = 10
+
+[venues.pinnacle]
+mode = "odds_only"             # Sharp reference — no bet placement
+initial_balance = 0.00
+max_stake = 0.00
+min_stake = 0.00
+max_bets_per_hour = 0

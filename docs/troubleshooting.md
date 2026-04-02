@@ -61,8 +61,10 @@
 ## Engine
 
 ### Arbs with "DRAW" selections (fake arbs)
-**Cause**: Soccer/MLS moneylines are 3-way (win/draw/lose). Pairing "Team A wins" with "Draw" is not a valid 2-way arb — if Team B wins, both bets lose.
-**Fix**: Fixed in `arb_detector.rs` — draw selections are excluded from moneyline complementarity checks. Only team-vs-team pairs are valid.
+**Cause**: Soccer/MLS moneylines are 3-way (win/draw/lose). Pairing "Team A wins" with "Draw" is not a valid 2-way arb — if Team B wins, both bets lose. These appeared as 40-70% arbs which were obviously too good to be true.
+**Fix**: Two-layer fix:
+1. `team_names.rs` — `normalize_selection()` now catches "Draw", "The Draw", "Tie" and normalizes them to lowercase `"draw"` before they reach the team name normalizer (which would turn them into `"DRAW"` or `"DRA"`).
+2. `arb_detector.rs` — `are_selections_complementary()` excludes `"draw"` from moneyline pairing. Only team-vs-team pairs are valid 2-way arbs.
 
 ### "failed to open sqlite db"
 **Cause**: `data/` directory doesn't exist relative to where the engine runs.
