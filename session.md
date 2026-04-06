@@ -198,16 +198,47 @@ NHL spread arbs were still showing 34-38% after the abs line fix. Root cause: Pi
 
 **Fix**: Filter out `isAlternate: true` markets from Pinnacle. Only main lines are imported. Pinnacle's market count dropped from ~1,500 to ~750 per sport (alternates removed). Alternates can be re-enabled later if DK/FD alternate scanning is added.
 
+### V4 Engine Merge (Completed)
+Merged partner's V4 engine improvements into H2:
+
+**Safety filters added:**
+- **Per-venue vig check** — validates implied probability 0.95-1.25 per venue before pairing. Catches misclassified markets (3-way as 2-way, wrong period, doubleheader collisions).
+- **Partial-period ML block** — blocks non-full-game moneylines (F3/F5/1st half MLs can tie)
+- **Spread line sign validation** — requires opposite signs (-1.5 vs +1.5) to prevent same-side pairing
+- **>15% arb warning** — logs `[HIGH%]` but doesn't block (root cause fixes handle it)
+- **require_pinnacle_leg = true** — DK-FD arbs blocked after losing money on them
+- **Time-to-start filter** — skips events >6h away (capital lockup) and <2min (suspension risk)
+
+**Execution improvements:**
+- **Quote sigma revalidation** — after Pinnacle quote returns current price, recalculates sigma. Aborts if >= 1.0 (arb closed).
+- **Post-fill sigma revalidation** — after leg 1 fills at actual odds, recalculates sigma. Aborts leg 2 if >= 1.0 (one-sided exposure better than guaranteed loss).
+- **Soft-book-first ordering** — FD/DK first, Pinnacle second. If soft book rejects = zero exposure.
+- **Balance-aware stake scaling** — `compute_stakes_with_balances()` scales down stakes to fit venue balances instead of rejecting.
+- **Periodic balance refresh** — every 60 cycles (~5 min) re-fetches real balances from sportsbooks.
+
+**Data integrity fixes:**
+- **is_live always false** in MarketIdentityKey — DK hardcodes false, PIN uses true for same live game. Using actual value broke cross-venue live game pairing.
+- **Doubleheader fix** — `extract_date()` includes hour (`2026-03-15T19`) to disambiguate G1/G2.
+- **DK alt market detection** — `resolve_dk_market_type(label, is_main)` separates alt_spread/alt_total.
+- **Pinnacle period mapping 0-9** — all periods explicitly mapped (F3, regulation, individual innings).
+- **Odds drift widened** — 3% → 5% (was rejecting valid arbs)
+
+**Pinnacle hybrid adapter:**
+- Browser launches for token extraction (auto, no manual env vars)
+- API calls use direct `fetch()` instead of `context.request` (faster)
+- Tokens auto-refresh from browser localStorage every 5 minutes
+
 ---
 
 ## Known Issues
 
 | Issue | Status |
 |-------|--------|
-| **One-sided exposure on leg 2 failure** | Mitigated — Pinnacle pre-flight quote prevents min stake rejections. Still possible if DK/FD rejects for other reasons (session expired, market closed). Rescue hedger exists but not wired up. |
+| **One-sided exposure** | Mitigated — pre-flight quote + quote sigma revalidation prevent most cases. Post-fill sigma revalidation can intentionally cause it (better than guaranteed loss). Rescue hedger exists but not wired up. |
 | DK TLS on Windows | Mitigated via dk-proxy.js (using fetch) |
 | FD sessions expire ~13 min | Keepalive refreshes every 5 min, may still expire |
 | DK/FD max stake limits unknown | Soft books may limit max bet amounts per user. Partner working on detection. |
+| DK-FD arbs blocked | `require_pinnacle_leg=true` — these lost money. All arbs must have Pinnacle on one side. |
 | NFL/NCAAF DK fetches fail | Offseason — expected, harmless warnings |
 | PIN MLB occasional 401 | Pinnacle sometimes returns Unauthorized for specific leagues. Retries next cycle. |
 

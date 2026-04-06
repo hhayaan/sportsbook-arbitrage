@@ -46,16 +46,16 @@ The brain of the system. Runs a Tokio async runtime with:
 
 - **Odds Fetcher** (`odds_fetcher.rs`) — Concurrent HTTP fetchers for DK (via proxy), FD, and Pinnacle. Fetches 15+ endpoints in parallel every 5 seconds.
 - **Order Book** (`models.rs`) — Two-level HashMap: `MarketIdentityKey -> VenueSelectionKey -> PriceEntry`. Groups the same bet across venues for comparison.
-- **Arb Detector** (`arb_detector.rs`) — For each market, checks all cross-venue pairs. If `sigma = 1/odds_a + 1/odds_b < 1.0`, it's a guaranteed-profit arb. Blocks 3-way soccer moneylines via `THREE_WAY_SPORTS` list. Draw selections excluded. Spread `line_key` uses absolute value to prevent same-side pairing. Supports `alt_total`, `alt_spread`, `player_prop` market types.
-- **Team Names** (`team_names.rs`) — 200+ team name normalizations across all sports. Normalizes "Draw"/"Tie" to `"draw"`. Player prop parsing (`normalize_player`, `parse_player_prop`). Epoch date parsing and hash fallback for event IDs.
-- **Stake Optimizer** (`stake_optimizer.rs`) — Proportional stake sizing to equalize payouts across both legs.
-- **Live Executor** (`live_executor.rs`) — Sends bet commands over WebSocket to the bet placer. FD-first ordering (soft book). 20s fill timeout.
-- **Paper Executor** (`paper_executor.rs`) — Simulated instant fills for testing.
+- **Arb Detector** (`arb_detector.rs`) — 14-layer safety filter chain. Blocks 3-way soccer moneylines, partial-period MLs, checks per-venue vig consistency (0.95-1.25), validates spread sign complementarity, requires Pinnacle leg, warns on >15% arbs. Supports moneyline, spread, total, alt_spread, alt_total, player_prop.
+- **Team Names** (`team_names.rs`) — 200+ team name normalizations. Draw normalization. Player prop parsing. Event IDs include hour for doubleheader disambiguation. Epoch date parsing with hash fallback.
+- **Stake Optimizer** (`stake_optimizer.rs`) — Proportional stake sizing with balance-aware scaling. Scales down to fit venue balances instead of rejecting.
+- **Live Executor** (`live_executor.rs`) — WebSocket bet execution. Soft-book-first ordering. Two-stage sigma revalidation (quote + post-fill). Pre-flight Pinnacle quote with stake adjustment. 20s fill timeout.
+- **Paper Executor** (`paper_executor.rs`) — Simulated instant fills with balance-aware scaling.
 - **Safety Systems**:
-  - Odds drift verification — rejects if odds moved >3% since detection (`odds_verifier.rs`)
+  - Odds drift verification — rejects if odds moved >5% since detection (`odds_verifier.rs`)
   - Circuit breaker — pauses trading on excessive losses or rejections (`circuit_breaker.rs`)
   - Rate limiter — per-venue sliding window bet limits (`rate_limiter.rs`)
-  - Rescue hedger — computes hedge when leg 2 fails after leg 1 fills (`rescue_hedger.rs`)
+  - Rescue hedger — computes hedge when leg 2 fails after leg 1 fills (`rescue_hedger.rs`, not wired up)
 - **SQLite DB** (`db.rs`) — Persists balances, trades, arb opportunities, settings.
 - **REST API** (`api.rs`) — Axum handlers on port 3401 for settings, balances, trades, stats.
 - **WebSocket Broadcaster** (`ws.rs`) — Pushes real-time events to any connected client.
@@ -91,10 +91,11 @@ A minimal Node.js HTTP proxy on port 3403. The Rust engine's `reqwest` library c
 - **Hosts**: `sib.on.sportsbook.fanduel.ca` (imply), `spb.on.sportsbook.fanduel.ca` (place), `smp.on.sportsbook.fanduel.ca` (prices)
 - **Selection ID format**: `{marketId}:{selectionId}` (e.g., `801.161172464:60427`)
 
-### Pinnacle (`pinnacle.js`)
+### Pinnacle (`pinnacle.js`) — Hybrid Adapter
 
-- **Auth**: Three headers — `x-api-key` (static app key), `x-device-uuid`, `x-session` (from `localStorage["Main:User"]`)
-- **Bet flow**: `quote()` (returns `marketId` + current `price`) -> `placeBet()` (returns `PENDING_ACCEPTANCE`) -> poll `GET /bets?requestIds=` until accepted (~7-8s)
+- **Auth**: Three headers — `x-api-key` (static app key), `x-device-uuid`, `x-session` (extracted from browser localStorage, auto-refreshed every 5 min)
+- **HTTP transport**: Direct `fetch()` (not context.request) — faster than browser-based requests. Browser stays open as token source only.
+- **Bet flow**: `quote()` (returns `marketId` + current `price` + min/max stakes) -> `placeBet()` (returns `PENDING_ACCEPTANCE`) -> poll `GET /bets?requestIds=` until accepted (~7-8s)
 - **Host**: `api.arcadia.pinnacle.com/0.1`
 - **Selection ID format**: `{matchupId}:{marketKey}:{designation}` (e.g., `1627197304:s;0;m:home`)
 - **No PerimeterX** — cleanest API of the three

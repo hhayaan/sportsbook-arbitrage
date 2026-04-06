@@ -18,7 +18,7 @@ cd C:\dev\sports-arb-h2; node dk-proxy.js
 # T2: Bet Placer (opens 3 Chrome windows — log in to all, type "balance" to verify)
 cd C:\dev\sports-arb-h2\bet-placer; node index.js
 # T3: Engine
-cd C:\dev\sports-arb-h2\engine; $env:LIVE_MODE="1"; $env:FIXED_STAKE="1"; $env:MAX_STAKE="2"; $env:MIN_ARB_PCT="0.1"; cargo run
+cd C:\dev\sports-arb-h2\engine; $env:LIVE_MODE="1"; $env:FIXED_STAKE="1"; $env:MAX_STAKE="2"; $env:MIN_ARB_PCT="0.5"; cargo run
 ```
 
 ## Engine Env Vars
@@ -31,26 +31,28 @@ cd C:\dev\sports-arb-h2\engine; $env:LIVE_MODE="1"; $env:FIXED_STAKE="1"; $env:M
 | `STAKE_MODE` | `fixed` | `fixed` or `proportional` |
 | `PROPORTIONAL_PCT` | `5` | % of balance |
 | `ENABLED` | `true` | `false` = scan only |
+| `MAX_HOURS_TO_START` | `6` | Max hours before event start |
+| `BALANCE_REFRESH_CYCLES` | `60` | Periodic balance sync interval (cycles) |
 
 ## Key Files
 | File | Purpose |
 |------|---------|
 | `engine/src/main.rs` | Entry point, polling loop, execution |
 | `engine/src/odds_fetcher.rs` | DK/FD/PIN odds fetchers |
-| `engine/src/arb_detector.rs` | Sigma calc, cross-venue detection |
-| `engine/src/live_executor.rs` | WebSocket bet execution |
+| `engine/src/arb_detector.rs` | Sigma calc, cross-venue detection, vig check, safety filters |
+| `engine/src/live_executor.rs` | WebSocket bet execution, balance-aware scaling, sigma revalidation |
 | `engine/src/models.rs` | Order book, data structures |
 | `engine/src/config.rs` | Sports, leagues, API hosts |
 | `bet-placer/index.js` | WS server, adapter dispatch |
 | `bet-placer/src/sportsbooks/draftkings.js` | DK adapter (page.evaluate) |
 | `bet-placer/src/sportsbooks/fanduel.js` | FD adapter (context.request.post) |
-| `bet-placer/src/sportsbooks/pinnacle.js` | PIN adapter (context.request) |
+| `bet-placer/src/sportsbooks/pinnacle.js` | PIN adapter (hybrid: browser tokens + direct fetch) |
 | `dk-proxy.js` | DK TLS workaround |
 
 ## Bet Placement Methods
 - **DraftKings**: `page.evaluate(fetch())` with `credentials: "include"` (browser cookies)
 - **FanDuel**: `context.request.post()` (Node-side HTTP, bypasses PerimeterX)
-- **Pinnacle**: `context.request.post()` with `x-api-key`, `x-device-uuid`, `x-session` headers
+- **Pinnacle**: Hybrid — browser extracts tokens from localStorage, direct `fetch()` for API calls (faster than context.request). Tokens auto-refresh every 5 min.
 
 ## Selection ID Formats
 - DK: `0ML{marketId}_{outcomeIndex}` (e.g., `0ML84036019_3`)
@@ -58,7 +60,23 @@ cd C:\dev\sports-arb-h2\engine; $env:LIVE_MODE="1"; $env:FIXED_STAKE="1"; $env:M
 - PIN: `{matchupId}:{marketKey}:{designation}` (e.g., `1627197304:s;0;m:home`)
 
 ## Execution Order
-Pinnacle first (pre-flight quote checks min/max stakes) -> FD first (soft book) -> DK. If leg 1 fails, leg 2 is never placed.
+Soft book FIRST, Pinnacle second. FD or DK places first; Pinnacle places second. If leg 1 fails, leg 2 is never placed. Pinnacle pre-flight quote still runs before any bets to validate stakes. Two-stage sigma revalidation: quote sigma (after PIN quote) + post-fill sigma (after leg 1 fills).
+
+## Safety Filters (in order)
+1. 3-way sport ML block (soccer — home/draw/away not valid 2-leg arb)
+2. Partial-period ML block (full_game only for moneylines)
+3. Per-venue vig self-consistency check (0.95-1.25 range)
+4. Spread line sign check (opposite signs only)
+5. Require Pinnacle leg (DK-FD arbs blocked — lost money on those)
+6. Circuit breaker (cumulative loss or rejection rate)
+7. Rate limiter (per-venue sliding window)
+8. Odds drift (5% threshold)
+9. >15% arb warning [HIGH%] (log only, doesn't block)
+10. Time-to-start (2 minutes to MAX_HOURS_TO_START)
+11. Balance-aware stake scaling (scales down to fit venue balances)
+12. Quote sigma revalidation (abort if sigma >= 1.0 after PIN quote)
+13. Post-fill sigma revalidation (abort leg 2 if sigma >= 1.0 after leg 1 fills)
+14. 60-second dedup cooldown
 
 ## Sports
 NBA, NHL, MLB, NFL, NCAAB, NCAAF, EPL, La Liga, Serie A, Bundesliga, Ligue 1, UCL, MLS, UFC
@@ -72,12 +90,12 @@ NBA, NHL, MLB, NFL, NCAAB, NCAAF, EPL, La Liga, Serie A, Bundesliga, Ligue 1, UC
 - Region: Ontario (CA-ON)
 
 ## Known Issues
-- **ONE-SIDED EXPOSURE**: If leg 2 fails after leg 1 fills, you have an unhedged bet. Rescue hedger exists but not wired up. Need per-venue min stake enforcement.
+- **ONE-SIDED EXPOSURE**: If leg 2 fails after leg 1 fills, you have an unhedged bet. Rescue hedger exists but not wired up. Post-fill sigma revalidation can cause this intentionally (one-sided exposure better than guaranteed loss).
 - DK TLS on Windows -> use dk-proxy.js (uses fetch, not https.get)
 - FD sessions expire ~13 min, keepalive refreshes every 5 min
 - True DK-FD arbs are rare; most arbs involve Pinnacle
 - NFL/NCAAF DK fetches fail in offseason (harmless)
-- Pinnacle min stake ~$0.81 CAD — stakes below this get rejected
+- Pinnacle min stake ~$0.81 CAD — pre-flight quote adjusts stakes automatically
 - Draw selections normalized to "draw" in team_names.rs, excluded from moneyline arbs in arb_detector.rs
 - 3-way soccer moneylines blocked via THREE_WAY_SPORTS in arb_detector.rs
 - Spread line_key uses absolute value to prevent same-side pairing
