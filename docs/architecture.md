@@ -82,6 +82,7 @@ A minimal Node.js HTTP proxy on port 3403. The Rust engine's `reqwest` library c
 - **Bet flow**: `getSelectionInfo()` -> `calculateBets()` (returns `token` + `calculationId`) -> `placeBet()` -> `waitForConfirmation()` (poll up to 15s)
 - **Host**: `gaming-ca-on.draftkings.com/api/wager/v1`
 - **Selection ID format**: `0ML{marketId}_{outcomeIndex}` (moneyline), `0HC{marketId}...` (spread), `0OU{marketId}...` (total)
+- **Spread/total placement**: Requires `points` field in `selections` array of `placeBets` (e.g., `points: 1.5`). Passed through from `calculateBets` response. Without it, DK returns `NewOffer` and refunds.
 
 ### FanDuel (`fanduel.js`)
 
@@ -143,7 +144,7 @@ Entries expire after 30 seconds (`MAX_DATA_AGE_MS`). The book uses diff-based up
 ## File Structure
 
 ```
-sports-arb-h2/
+sportsbook-arbitrage/
 ├── engine/                         <- Rust (Tokio + Axum)
 │   ├── Cargo.toml
 │   ├── .cargo/config.toml          <- MSVC linker paths

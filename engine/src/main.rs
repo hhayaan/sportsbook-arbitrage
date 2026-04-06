@@ -67,7 +67,7 @@ async fn main() {
     }
 
     let max_hours_to_start: i64 = std::env::var("MAX_HOURS_TO_START")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(6);
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(24);
     let balance_refresh_cycles: u64 = std::env::var("BALANCE_REFRESH_CYCLES")
         .ok().and_then(|v| v.parse().ok()).unwrap_or(60);
 

@@ -70,7 +70,8 @@ POST https://gaming-ca-on.draftkings.com/api/wager/v1/calculateBets
 Body: { selections: [{ id: "0ML84036019_3" }], selectionsForYourBet: [], oddsStyle: "american" }
 ```
 
-Response body: `{ bets: [{ token }], selections: [{ trueOdds, displayOdds }] }`
+Response body: `{ bets: [{ token }], selections: [{ trueOdds, displayOdds, points? }] }`
+`points` is returned for spread/total markets (e.g., `1.5`, `226.5`). Not present for moneylines.
 Response header: `calculationid` (required for placement)
 
 ### Step 3: Place Bets
@@ -81,8 +82,10 @@ Headers: { calculationid: "<from step 2>" }
 
 Body: {
   bets: [{ type: "Single", selectionsMapped: [{ id }], stake, trueOdds, displayOdds, potentialReturns, token }],
+  selections: [{ id, trueOdds, displayOdds, points? }],
   autoAcceptMode: "AcceptHigher"
 }
+`points` must be included in `selections` for spread/total bets. Without it, DK returns `NewOffer` and silently refunds. Moneylines omit `points`.
 ```
 
 ### Step 4: Poll (if needed)
@@ -91,7 +94,7 @@ Body: {
 GET https://gaming-ca-on.draftkings.com/api/wager/v1/getPurchases?PurchaseIds={waitingBetId}&format=json
 ```
 
-Poll every 1s up to 15s. Status: `LiveDelay` -> `Open` (confirmed).
+Poll every 1s up to 15s. Status: `LiveDelay` -> `Open` (confirmed). `NewOffer` means odds changed and bet was not accepted (will be refunded).
 
 ### Selection ID Format
 

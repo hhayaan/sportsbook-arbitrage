@@ -230,7 +230,7 @@ async fn fetch_dk_inner(
     for (eid_str, event) in &events_map {
         let event_name = event.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let start_time = event.get("startEventDate").and_then(|v| v.as_str()).unwrap_or("");
-        let is_live = false; // Sportscontent API is pre-match
+        let is_live = event.get("status").and_then(|v| v.as_str()) == Some("STARTED");
 
         let participants = event.get("participants").and_then(|v| v.as_array());
         let (dk_away, dk_home) = if let Some(parts) = participants {

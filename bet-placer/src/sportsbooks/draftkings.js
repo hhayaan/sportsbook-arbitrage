@@ -131,11 +131,14 @@ class DraftKingsAdapter {
     stake,
     trueOdds,
     displayOdds,
+    points,
     token,
     calculationId,
     autoAcceptMode = "AcceptHigher",
   }) {
     const url = `${HOSTS.gaming}/api/wager/v1/placeBets`;
+    const selectionObj = { id: selectionId, trueOdds, displayOdds };
+    if (points !== undefined) selectionObj.points = points;
     const body = {
       bets: [
         {
@@ -150,7 +153,7 @@ class DraftKingsAdapter {
           token,
         },
       ],
-      selections: [{ id: selectionId, trueOdds, displayOdds }],
+      selections: [selectionObj],
       selectionsForYourBet: [],
       locale: "en-US",
       oddsStyle: "american",
@@ -244,6 +247,7 @@ class DraftKingsAdapter {
       stake,
       trueOdds: currentOdds.trueOdds,
       displayOdds: currentOdds.displayOdds,
+      points: currentOdds.points,
       token: bet.token,
       calculationId,
     });

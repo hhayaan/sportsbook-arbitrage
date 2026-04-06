@@ -12,10 +12,10 @@
 
 ```powershell
 # Install Node dependencies
-cd C:\dev\sports-arb-h2\bet-placer; npm install
+cd C:\dev\sportsbook-arbitrage\bet-placer; npm install
 
 # Build Rust engine (first build downloads + compiles dependencies, takes a few minutes)
-cd C:\dev\sports-arb-h2\engine; cargo build
+cd C:\dev\sportsbook-arbitrage\engine; cargo build
 ```
 
 ## Running — Paper Trading
@@ -24,27 +24,27 @@ No browsers needed. Scans odds and simulates trades.
 
 ```powershell
 # Terminal 1: DK Proxy
-cd C:\dev\sports-arb-h2; node dk-proxy.js
+cd C:\dev\sportsbook-arbitrage; node dk-proxy.js
 
 # Terminal 2: Engine
-cd C:\dev\sports-arb-h2\engine; cargo run
+cd C:\dev\sportsbook-arbitrage\engine; cargo run
 ```
 
 ## Running — Live Trading
 
 ```powershell
 # Terminal 1: DK Proxy
-cd C:\dev\sports-arb-h2; node dk-proxy.js
+cd C:\dev\sportsbook-arbitrage; node dk-proxy.js
 
 # Terminal 2: Bet Placer (opens 3 Chrome windows)
-cd C:\dev\sports-arb-h2\bet-placer; node index.js
+cd C:\dev\sportsbook-arbitrage\bet-placer; node index.js
 ```
 
 **Pause here** — Log in to DraftKings, FanDuel, and Pinnacle in the browser windows. Type `balance` to verify all three sessions.
 
 ```powershell
 # Terminal 3: Engine (live mode with test stakes)
-cd C:\dev\sports-arb-h2\engine; $env:LIVE_MODE="1"; $env:FIXED_STAKE="1"; $env:MAX_STAKE="2"; $env:MIN_ARB_PCT="0.1"; cargo run
+cd C:\dev\sportsbook-arbitrage\engine; $env:LIVE_MODE="1"; $env:FIXED_STAKE="1"; $env:MAX_STAKE="2"; $env:MIN_ARB_PCT="0.1"; cargo run
 ```
 
 ## Verifying Sessions

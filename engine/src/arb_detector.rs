@@ -184,7 +184,7 @@ pub fn detect_arbs(book: &Book, now_ms: u64, max_data_age_ms: u64, require_pinna
                                 arb_pct,
                                 roi,
                                 line: ea.line,
-                                is_live: key.is_live,
+                                is_live: ea.is_live || eb.is_live,
                             });
                         }
                     }

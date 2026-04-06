@@ -14,11 +14,11 @@ Engine --HTTP--> Pinnacle odds API (direct)
 ## Running (Live Mode)
 ```powershell
 # T1: DK Proxy
-cd C:\dev\sports-arb-h2; node dk-proxy.js
+cd C:\dev\sportsbook-arbitrage; node dk-proxy.js
 # T2: Bet Placer (opens 3 Chrome windows — log in to all, type "balance" to verify)
-cd C:\dev\sports-arb-h2\bet-placer; node index.js
+cd C:\dev\sportsbook-arbitrage\bet-placer; node index.js
 # T3: Engine
-cd C:\dev\sports-arb-h2\engine; $env:LIVE_MODE="1"; $env:FIXED_STAKE="1"; $env:MAX_STAKE="2"; $env:MIN_ARB_PCT="0.5"; cargo run
+cd C:\dev\sportsbook-arbitrage\engine; $env:LIVE_MODE="1"; $env:FIXED_STAKE="1"; $env:MAX_STAKE="2"; $env:MIN_ARB_PCT="0.5"; cargo run
 ```
 
 ## Engine Env Vars
@@ -31,7 +31,7 @@ cd C:\dev\sports-arb-h2\engine; $env:LIVE_MODE="1"; $env:FIXED_STAKE="1"; $env:M
 | `STAKE_MODE` | `fixed` | `fixed` or `proportional` |
 | `PROPORTIONAL_PCT` | `5` | % of balance |
 | `ENABLED` | `true` | `false` = scan only |
-| `MAX_HOURS_TO_START` | `6` | Max hours before event start |
+| `MAX_HOURS_TO_START` | `24` | Max hours before event start |
 | `BALANCE_REFRESH_CYCLES` | `60` | Periodic balance sync interval (cycles) |
 
 ## Key Files
@@ -50,14 +50,21 @@ cd C:\dev\sports-arb-h2\engine; $env:LIVE_MODE="1"; $env:FIXED_STAKE="1"; $env:M
 | `dk-proxy.js` | DK TLS workaround |
 
 ## Bet Placement Methods
-- **DraftKings**: `page.evaluate(fetch())` with `credentials: "include"` (browser cookies)
+- **DraftKings**: `page.evaluate(fetch())` with `credentials: "include"` (browser cookies). Spread/total bets require `points` field in `selections` array (passed through from `calculateBets` response).
 - **FanDuel**: `context.request.post()` (Node-side HTTP, bypasses PerimeterX)
 - **Pinnacle**: Hybrid — browser extracts tokens from localStorage, direct `fetch()` for API calls (faster than context.request). Tokens auto-refresh every 5 min.
 
 ## Selection ID Formats
-- DK: `0ML{marketId}_{outcomeIndex}` (e.g., `0ML84036019_3`)
+- DK: `0ML{marketId}_{outcomeIndex}` (moneyline), `0HC{marketId}...` (spread), `0OU{marketId}...` (total)
 - FD: `{marketId}:{selectionId}` (e.g., `801.161172464:60427`)
 - PIN: `{matchupId}:{marketKey}:{designation}` (e.g., `1627197304:s;0;m:home`)
+
+## Verified Market Coverage
+| Venue | Moneyline | Spread | Total | Player Props |
+|---|---|---|---|---|
+| DK | ✅ verified | ✅ verified | ✅ verified | ❌ untested |
+| FD | ✅ verified | ✅ verified | ✅ verified | ❌ untested |
+| PIN | ✅ verified | ✅ verified | ✅ verified | ❌ untested |
 
 ## Execution Order
 Soft book FIRST, Pinnacle second. FD or DK places first; Pinnacle places second. If leg 1 fails, leg 2 is never placed. Pinnacle pre-flight quote still runs before any bets to validate stakes. Two-stage sigma revalidation: quote sigma (after PIN quote) + post-fill sigma (after leg 1 fills).
@@ -89,6 +96,9 @@ NBA, NHL, MLB, NFL, NCAAB, NCAAF, EPL, La Liga, Serie A, Bundesliga, Ligue 1, UC
 - Never commit browser profiles, cookies, or auth tokens
 - Region: Ontario (CA-ON)
 
+## Live vs Pre-Game Scanning
+All 3 venues scan both live (in-play) and pre-game events. DK uses `status: "STARTED"` to detect live games. FD uses `eventStatus`. PIN uses `isLive`. The `MarketIdentityKey.is_live` is always forced to `false` for cross-venue pairing (DK/PIN disagreed on live status for same game). The actual `is_live` flag flows through `PriceEntry` → `ArbCandidate` for the time-to-start filter (live games skip it).
+
 ## Known Issues
 - **ONE-SIDED EXPOSURE**: If leg 2 fails after leg 1 fills, you have an unhedged bet. Rescue hedger exists but not wired up. Post-fill sigma revalidation can cause this intentionally (one-sided exposure better than guaranteed loss).
 - DK TLS on Windows -> use dk-proxy.js (uses fetch, not https.get)
@@ -100,6 +110,7 @@ NBA, NHL, MLB, NFL, NCAAB, NCAAF, EPL, La Liga, Serie A, Bundesliga, Ligue 1, UC
 - 3-way soccer moneylines blocked via THREE_WAY_SPORTS in arb_detector.rs
 - Spread line_key uses absolute value to prevent same-side pairing
 - Pinnacle alternate lines filtered out (isAlternate) — no DK/FD alternates to pair against
+- DK minimum bet is ~$0.50 (bets below this are accepted then refunded)
 
 ## REST API (port 3401)
 ```powershell

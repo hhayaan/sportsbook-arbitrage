@@ -95,6 +95,25 @@ Merged 17 safety improvements from partner's V4 engine update into H2.
 - **Auth**: `x-api-key` (static: `CmX2KcMrXuFmNg6YFbmTxE0y9CIrOi0R`), `x-device-uuid`, `x-session`
 - **Min stake**: ~$0.81 CAD (varies per market, obtained from quote response)
 
+## Verified Market Coverage (as of 2026-04-06)
+
+| Venue | Moneyline | Spread | Total | Player Props |
+|---|---|---|---|---|
+| DK | ✅ verified | ✅ verified | ✅ verified | ❌ untested |
+| FD | ✅ verified | ✅ verified | ✅ verified | ❌ untested |
+| PIN | ✅ verified | ✅ verified | ✅ verified | ❌ untested |
+
+DK spread/total bets require `points` field in `selections` array of `placeBets` request (e.g., `points: 1.5` for spread). Without it, DK returns `NewOffer` and silently refunds. DK minimum bet is ~$0.50 (below this gets refunded).
+
+## Live vs Pre-Game Scanning
+
+All 3 venues scan both live (in-play) and pre-game events:
+- **DK**: `status: "STARTED"` in Sportscontent API event object
+- **FD**: `eventStatus` field from API
+- **PIN**: `isLive` field from API
+
+`MarketIdentityKey.is_live` is always forced to `false` for cross-venue pairing (DK and PIN disagreed on live status for the same game). The actual `is_live` flag flows through `PriceEntry` → `ArbCandidate` so the time-to-start filter correctly skips live games.
+
 ---
 
 ## 14-Layer Safety Filter Chain (in order)
@@ -143,7 +162,7 @@ Soft book FIRST, Pinnacle second. Pre-flight quote runs before any bets.
 | `STAKE_MODE` | `fixed` | `fixed` or `proportional` |
 | `PROPORTIONAL_PCT` | `5` | % of balance |
 | `ENABLED` | `true` | `false` = scan only |
-| `MAX_HOURS_TO_START` | `6` | Max hours before event start |
+| `MAX_HOURS_TO_START` | `24` | Max hours before event start |
 | `BALANCE_REFRESH_CYCLES` | `60` | Periodic balance sync interval (cycles) |
 
 ### Hardcoded Values
@@ -190,6 +209,8 @@ Only entries where odds actually changed get written to the book. Unchanged entr
 11. **Pinnacle alternates** — Alternate spread lines at different odds paired against main lines. Fixed: `isAlternate` filter.
 12. **is_live mismatch** — DK=false, PIN=true for same live game. Fixed: always false in MarketIdentityKey.
 13. **Doubleheader collision** — Same teams, same day, different times got same event ID. Fixed: `extract_date()` includes hour.
+14. **DK is_live hardcoded false** — DK odds_fetcher hardcoded `is_live = false` instead of reading `status` field from API. Live DK events have `status: "STARTED"`. Fixed: parse `is_live` from API. Also fixed arb_detector to use `ea.is_live || eb.is_live` instead of `key.is_live` (always false) for ArbCandidate, so live games correctly skip the time-to-start filter.
+15. **DK spread/total bet placement** — DK `placeBets` API requires `points` field in `selections` array for spread/total bets (e.g., `points: 1.5` for spread, `points: 226.5` for total). Without it, DK returns `NewOffer` status and silently refunds the bet. Fixed: `draftkings.js` now passes `points` from `calculateBets` response through to `placeBet`. Moneylines don't have `points` and are unaffected.
 
 ---
 

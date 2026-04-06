@@ -22,6 +22,10 @@
 **Cause**: DK returned `waitingBetId` but bet never confirmed.
 **Fix**: Check your DK account — bet may still be pending. Don't retry blindly.
 
+### Spread/total bet placed but refunded (status: "NewOffer")
+**Cause**: DK `placeBets` API requires `points` field in `selections` array for spread/total markets. Without it, DK accepts the bet but returns `NewOffer` instead of `Open`, then refunds within 2 minutes.
+**Fix**: Fixed in `draftkings.js` — `points` from `calculateBets` response is now passed through to `placeBet`. DK minimum bet is ~$0.50; below this also gets refunded.
+
 ## FanDuel
 
 ### "placeBet failed (403): DSC-0015"
@@ -84,7 +88,7 @@
 
 ### "failed to open sqlite db"
 **Cause**: `data/` directory doesn't exist relative to where the engine runs.
-**Fix**: `mkdir C:\dev\sports-arb-h2\engine\data`
+**Fix**: `mkdir C:\dev\sportsbook-arbitrage\engine\data`
 
 ### "WebSocket connection failed — falling back to paper"
 **Cause**: Bet placer not running when engine starts.
@@ -115,9 +119,9 @@
 ### Browser profile corrupted
 **Fix**: Delete the profile and re-login:
 ```powershell
-Remove-Item -Recurse -Force C:\dev\sports-arb-h2\data\profiles\draftkings
-Remove-Item -Recurse -Force C:\dev\sports-arb-h2\data\profiles\fanduel
-Remove-Item -Recurse -Force C:\dev\sports-arb-h2\data\profiles\pinnacle
+Remove-Item -Recurse -Force C:\dev\sportsbook-arbitrage\data\profiles\draftkings
+Remove-Item -Recurse -Force C:\dev\sportsbook-arbitrage\data\profiles\fanduel
+Remove-Item -Recurse -Force C:\dev\sportsbook-arbitrage\data\profiles\pinnacle
 ```
 Then restart the bet placer and log in again.
 
