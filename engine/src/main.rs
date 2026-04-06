@@ -297,18 +297,13 @@ async fn main() {
                     );
                 }
 
-                // Time-to-start filter
+                // Time-to-start filter: skip events too far in the future (capital lockup)
                 if !candidate.is_live {
                     if let Ok(start) = chrono::DateTime::parse_from_rfc3339(&candidate.start_time_utc) {
                         let now = chrono::Utc::now();
-                        let secs_to_start = (start.timestamp() - now.timestamp()).max(0);
-                        let hours_to_start = secs_to_start / 3600;
+                        let hours_to_start = (start.timestamp() - now.timestamp()).max(0) / 3600;
                         if hours_to_start > max_hours_to_start {
                             tracing::debug!("[TIME] {} {}h away, max={}h — skipping", candidate.event_id, hours_to_start, max_hours_to_start);
-                            continue;
-                        }
-                        if secs_to_start > 0 && secs_to_start < 120 {
-                            tracing::debug!("[TIME] {} <2min to start — danger zone, skipping", candidate.event_id);
                             continue;
                         }
                     }

@@ -72,7 +72,7 @@ Soft book FIRST, Pinnacle second. FD or DK places first; Pinnacle places second.
 7. Rate limiter (per-venue sliding window)
 8. Odds drift (5% threshold)
 9. >15% arb warning [HIGH%] (log only, doesn't block)
-10. Time-to-start (2 minutes to MAX_HOURS_TO_START)
+10. Time-to-start (skip events beyond MAX_HOURS_TO_START)
 11. Balance-aware stake scaling (scales down to fit venue balances)
 12. Quote sigma revalidation (abort if sigma >= 1.0 after PIN quote)
 13. Post-fill sigma revalidation (abort leg 2 if sigma >= 1.0 after leg 1 fills)
