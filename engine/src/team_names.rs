@@ -359,15 +359,20 @@ pub fn normalize_selection(market_type: &str, raw: &str, sport: &str) -> String 
 }
 
 fn extract_date(s: &str) -> Option<String> {
-    // ISO 8601: "2026-03-15T19:30:00Z" → "2026-03-15"
+    // ISO 8601 with hour: "2026-03-15T19:30:00Z" → "2026-03-15T19"
+    // Include hour to disambiguate doubleheader G1/G2 (same teams, same day, different times)
+    if s.len() >= 13 && s.as_bytes().get(4) == Some(&b'-') && s.as_bytes().get(7) == Some(&b'-') && s.as_bytes().get(10) == Some(&b'T') {
+        return Some(s[..13].to_string());
+    }
+    // Fallback: date only
     if s.len() >= 10 && s.as_bytes().get(4) == Some(&b'-') && s.as_bytes().get(7) == Some(&b'-') {
         return Some(s[..10].to_string());
     }
-    // Epoch milliseconds: "1711756200000" → date
+    // Epoch milliseconds: "1711756200000" → date with hour
     if let Ok(epoch_ms) = s.parse::<i64>() {
         let secs = if epoch_ms > 1_000_000_000_000 { epoch_ms / 1000 } else { epoch_ms };
         if let Some(dt) = chrono::DateTime::from_timestamp(secs, 0) {
-            return Some(dt.format("%Y-%m-%d").to_string());
+            return Some(dt.format("%Y-%m-%dT%H").to_string());
         }
     }
     None

@@ -212,7 +212,7 @@ async fn fetch_dk_inner(
         let is_main = mkt.get("main").and_then(|v| v.as_bool()).unwrap_or(false);
         if !is_main { continue; }
         let name = mkt.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let mkt_type = resolve_dk_market_type(name);
+        let mkt_type = resolve_dk_market_type(name, is_main);
         if mkt_type.is_empty() { continue; }
         if let Some(eid) = mkt.get("eventId") {
             markets_by_event.entry(val_str(eid)).or_default().push(mkt);
@@ -249,7 +249,8 @@ async fn fetch_dk_inner(
 
         for mkt in markets_by_event.get(eid_str).unwrap_or(&Vec::new()) {
             let mkt_name = mkt.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let market_type = resolve_dk_market_type(mkt_name);
+            let mkt_is_main = mkt.get("main").and_then(|v| v.as_bool()).unwrap_or(false);
+            let market_type = resolve_dk_market_type(mkt_name, mkt_is_main);
             let mkt_id = mkt.get("id").map(|v| val_str(v)).unwrap_or_default();
 
             for sel in sels_by_market.get(&mkt_id).unwrap_or(&Vec::new()) {
@@ -325,7 +326,7 @@ fn parse_dk_offer(
         .unwrap_or(false);
 
     let label = offer.get("label").and_then(|v| v.as_str()).unwrap_or("");
-    let market_type = resolve_dk_market_type(label);
+    let market_type = resolve_dk_market_type(label, true); // offer API markets are main
     if market_type.is_empty() {
         return;
     }
@@ -401,16 +402,16 @@ fn parse_dk_event_teams(event_name: &str) -> (String, String) {
     (event_name.to_string(), "unknown".to_string())
 }
 
-fn resolve_dk_market_type(label: &str) -> String {
+fn resolve_dk_market_type(label: &str, is_main: bool) -> String {
     let lower = label.to_lowercase();
     if lower.contains("moneyline") || lower == "money line" {
         "moneyline".to_string()
     } else if lower.contains("spread") || lower.contains("point spread") {
-        "spread".to_string()
+        if is_main { "spread".to_string() } else { "alt_spread".to_string() }
     } else if lower.contains("total") && lower.contains("team") {
         "team_total".to_string()
     } else if lower.contains("total") || lower.contains("over/under") || lower.contains("o/u") {
-        "total".to_string()
+        if is_main { "total".to_string() } else { "alt_total".to_string() }
     } else {
         String::new()
     }
@@ -797,6 +798,13 @@ async fn fetch_pinnacle(
                 0 => "full_game",
                 1 => "first_half",
                 2 => "second_half",
+                3 => "first_3_innings",
+                4 => "inning_4",
+                5 => "inning_5",
+                6 => "regulation",    // NHL/soccer 3-way with draw
+                7 => "inning_7",
+                8 => "inning_8",
+                9 => "inning_9",
                 _ => "full_game",
             };
 

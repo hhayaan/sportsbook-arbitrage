@@ -65,10 +65,17 @@ async fn main() {
     if any_override {
         db.update_settings(&settings_overrides);
     }
+
+    let max_hours_to_start: i64 = std::env::var("MAX_HOURS_TO_START")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(6);
+    let balance_refresh_cycles: u64 = std::env::var("BALANCE_REFRESH_CYCLES")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+
     tracing::info!(
-        "Settings: enabled={} stake_mode={} fixed_stake=${:.2} max_stake=${:.2} min_arb_pct={:.1}%",
+        "Settings: enabled={} stake_mode={} fixed_stake=${:.2} max_stake=${:.2} min_arb_pct={:.1}% max_hours={}",
         settings_overrides.enabled, settings_overrides.stake_mode,
-        settings_overrides.fixed_stake, settings_overrides.max_stake, settings_overrides.min_arb_pct
+        settings_overrides.fixed_stake, settings_overrides.max_stake, settings_overrides.min_arb_pct,
+        max_hours_to_start
     );
 
     // Init WebSocket broadcaster
@@ -215,9 +222,8 @@ async fn main() {
             );
 
             // Detect arbs
-            // require_pinnacle_leg: only trade arbs with Pinnacle on one side
-            // Set to false for testing, true for production
-            let require_pinnacle_leg = false; // TODO: load from config
+            // DK-FD arbs lost money — require Pinnacle on one side for production
+            let require_pinnacle_leg = true;
             let candidates = arb_detector::detect_arbs(&book, now_ms, config::MAX_DATA_AGE_MS, require_pinnacle_leg);
 
             if !candidates.is_empty() {
@@ -278,9 +284,34 @@ async fn main() {
                 }
 
                 // Odds drift verification
-                if let Err(reason) = odds_verifier::verify_both_legs(&book, candidate, 0.03) {
+                if let Err(reason) = odds_verifier::verify_both_legs(&book, candidate, 0.05) {
                     tracing::info!("[ODDS DRIFT] {}", reason);
                     continue;
+                }
+
+                // High-% arb warning (warn only, don't block)
+                if candidate.arb_pct > 0.15 {
+                    tracing::warn!(
+                        "[HIGH%] {:.1}% arb — possible mismatch: {} {}",
+                        candidate.arb_pct * 100.0, candidate.event_id, candidate.market_type
+                    );
+                }
+
+                // Time-to-start filter
+                if !candidate.is_live {
+                    if let Ok(start) = chrono::DateTime::parse_from_rfc3339(&candidate.start_time_utc) {
+                        let now = chrono::Utc::now();
+                        let secs_to_start = (start.timestamp() - now.timestamp()).max(0);
+                        let hours_to_start = secs_to_start / 3600;
+                        if hours_to_start > max_hours_to_start {
+                            tracing::debug!("[TIME] {} {}h away, max={}h — skipping", candidate.event_id, hours_to_start, max_hours_to_start);
+                            continue;
+                        }
+                        if secs_to_start > 0 && secs_to_start < 120 {
+                            tracing::debug!("[TIME] {} <2min to start — danger zone, skipping", candidate.event_id);
+                            continue;
+                        }
+                    }
                 }
 
                 // Execute trade if enabled
@@ -352,6 +383,23 @@ async fn main() {
                     venue: venue.to_string(),
                     markets: count,
                 });
+            }
+
+            // Periodic balance refresh (picks up winnings from settled bets)
+            if diff_cycle_count % balance_refresh_cycles == 0 && diff_cycle_count > 0 {
+                if let Some((ref writer, ref reader)) = ws_conn {
+                    match live_executor::fetch_balances(writer, reader).await {
+                        Ok(balances) => {
+                            for (venue, balance) in &balances {
+                                poll_db.update_balance(venue, *balance);
+                            }
+                            tracing::info!("[BALANCE REFRESH] synced {} venues", balances.len());
+                            let db_balances = poll_db.get_balances();
+                            let _ = poll_ws.send(models::WsEvent::BalanceUpdated { balances: db_balances });
+                        }
+                        Err(e) => tracing::warn!("[BALANCE REFRESH] failed: {}", e),
+                    }
+                }
             }
 
             tokio::time::sleep(Duration::from_secs(config::POLL_INTERVAL_SECS)).await;

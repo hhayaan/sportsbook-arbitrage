@@ -25,7 +25,13 @@ pub fn verify_leg(
     };
 
     let line_key = match candidate.line {
-        Some(l) => format!("{:.1}", l),
+        Some(l) => {
+            if candidate.market_type == "spread" || candidate.market_type == "alt_spread" {
+                format!("{:.1}", l.abs())
+            } else {
+                format!("{:.1}", l)
+            }
+        }
         None => "null".to_string(),
     };
 
@@ -34,7 +40,7 @@ pub fn verify_leg(
         market_type: candidate.market_type.clone(),
         line_key,
         period: candidate.period.clone(),
-        is_live: candidate.is_live,
+        is_live: false,
         player_key: String::new(),
     };
 

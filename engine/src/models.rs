@@ -60,7 +60,9 @@ impl MarketIdentityKey {
             market_type: m.market_type.clone(),
             line_key,
             period: m.period.clone(),
-            is_live: m.is_live,
+            // Always false: DK hardcodes is_live=false, PIN uses true for same live game.
+            // Using actual value breaks cross-venue pairing on live games.
+            is_live: false,
             player_key,
         }
     }

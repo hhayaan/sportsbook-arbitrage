@@ -2,11 +2,16 @@ const crypto = require("crypto");
 
 const API_BASE = "https://api.arcadia.pinnacle.com/0.1";
 const X_API_KEY = "CmX2KcMrXuFmNg6YFbmTxE0y9CIrOi0R";
+const TOKEN_REFRESH_MS = 5 * 60 * 1000; // Re-read tokens from browser every 5 min
 
 class PinnacleAdapter {
   constructor(browserManager) {
     this.browserManager = browserManager;
     this.bookId = "pinnacle";
+    this.deviceUuid = null;
+    this.session = null;
+    this.username = null;
+    this._lastTokenRefresh = 0;
   }
 
   _getPage() {
@@ -15,30 +20,29 @@ class PinnacleAdapter {
     return page;
   }
 
-  _getContext() {
-    const entry = this.browserManager.browsers.get(this.bookId);
-    if (!entry) throw new Error("Pinnacle browser not launched");
-    return entry.context;
-  }
+  async _refreshTokens() {
+    const now = Date.now();
+    if (this.session && now - this._lastTokenRefresh < TOKEN_REFRESH_MS) return;
 
-  async _getTokens() {
     const page = this._getPage();
-    return await page.evaluate(`
+    const user = await page.evaluate(`
       (() => {
         try {
-          const user = JSON.parse(localStorage.getItem("Main:User") || "{}");
-          return { deviceUuid: user.deviceId || null, session: user.token || null };
-        } catch(e) {
-          return { deviceUuid: null, session: null };
-        }
+          const u = JSON.parse(localStorage.getItem("Main:User") || "{}");
+          return { deviceUuid: u.deviceId || null, session: u.token || null, username: u.username || null };
+        } catch(e) { return { deviceUuid: null, session: null, username: null }; }
       })()
     `);
+
+    this.deviceUuid = user.deviceUuid;
+    this.session = user.session;
+    this.username = user.username;
+    this._lastTokenRefresh = now;
   }
 
   async _apiRequest(url, options = {}) {
     const { method = "GET", body = null } = options;
-    const context = this._getContext();
-    const tokens = await this._getTokens();
+    await this._refreshTokens();
 
     const headers = {
       "content-type": "application/json",
@@ -48,39 +52,35 @@ class PinnacleAdapter {
       "referer": "https://www.pinnacle.ca/",
     };
 
-    if (tokens.deviceUuid) headers["x-device-uuid"] = tokens.deviceUuid;
-    if (tokens.session) headers["x-session"] = tokens.session;
+    if (this.deviceUuid) headers["x-device-uuid"] = this.deviceUuid;
+    if (this.session) headers["x-session"] = this.session;
 
-    const requestOptions = { headers };
-    if (body) requestOptions.data = body;
+    const fetchOptions = { method, headers };
+    if (body) fetchOptions.body = JSON.stringify(body);
 
-    const resp = method === "POST"
-      ? await context.request.post(url, requestOptions)
-      : await context.request.get(url, requestOptions);
-
+    const resp = await fetch(url, fetchOptions);
     const text = await resp.text();
+
     return {
-      status: resp.status(),
-      headers: resp.headers(),
+      status: resp.status,
+      headers: Object.fromEntries(resp.headers.entries()),
       body: text,
       json: () => JSON.parse(text),
     };
   }
 
   async getBalance() {
-    const page = this._getPage();
-    const user = await page.evaluate(`JSON.parse(localStorage.getItem("Main:User") || "{}")`);
+    await this._refreshTokens();
     const resp = await this._apiRequest(`${API_BASE}/wallet/balance`);
     if (resp.status !== 200) throw new Error(`getBalance failed (${resp.status}): ${resp.body}`);
     const data = resp.json();
     return {
-      username: user.username || "pinnacle_user",
+      username: this.username || "pinnacle_user",
       accounts: [{ currencyCode: data.currency || "CAD", balance: data.amount || 0 }],
     };
   }
 
   async getSelectionInfo(selectionId) {
-    // selectionId format: "{matchupId}:{marketKey}:{designation}"
     const [matchupId, marketKey, designation] = selectionId.split(":");
     const resp = await this._apiRequest(`${API_BASE}/matchups/${matchupId}/market/${encodeURIComponent(marketKey)}`);
     if (resp.status !== 200) throw new Error(`getMarket failed (${resp.status}): ${resp.body}`);
@@ -100,7 +100,6 @@ class PinnacleAdapter {
   }
 
   async executeBet(selectionId, stake) {
-    // selectionId format: "{matchupId}:{marketKey}:{designation}"
     const parts = selectionId.split(":");
     const matchupId = parseInt(parts[0]);
     const marketKey = parts.slice(1, -1).join(":");

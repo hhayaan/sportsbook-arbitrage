@@ -16,7 +16,7 @@ pub fn try_execute(
     let leg1_balance = db.get_balance(&candidate.leg1_venue)?;
     let leg2_balance = db.get_balance(&candidate.leg2_venue)?;
 
-    let capital = match settings.stake_mode.as_str() {
+    let requested_capital = match settings.stake_mode.as_str() {
         "proportional" => {
             let smaller = leg1_balance.min(leg2_balance);
             (smaller * settings.proportional_pct / 100.0).min(settings.max_stake * 2.0)
@@ -24,23 +24,13 @@ pub fn try_execute(
         _ => settings.fixed_stake * 2.0,
     };
 
-    if capital <= 0.0 {
+    if requested_capital <= 0.0 {
         return None;
     }
 
-    let plan = stake_optimizer::compute_stakes(candidate, capital)?;
-
-    if plan.leg1_stake > leg1_balance || plan.leg2_stake > leg2_balance {
-        tracing::warn!(
-            "Insufficient balance: need ${:.2}+${:.2}, have ${:.2}+${:.2}",
-            plan.leg1_stake, plan.leg2_stake, leg1_balance, leg2_balance
-        );
-        return None;
-    }
-
-    if plan.leg1_stake > settings.max_stake || plan.leg2_stake > settings.max_stake {
-        return None;
-    }
+    let (plan, _effective_capital, _was_scaled) = stake_optimizer::compute_stakes_with_balances(
+        candidate, requested_capital, leg1_balance, leg2_balance, settings.max_stake
+    )?;
 
     // Deduct balances
     db.update_balance(&candidate.leg1_venue, leg1_balance - plan.leg1_stake);
