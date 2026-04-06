@@ -1,232 +1,210 @@
-# Session Handoff — Sports Arbitrage Bot H2
+# Complete Session Handoff — Sports Arbitrage Bot
 
 ## What This Document Is
 
-Full context dump of the entire development history from H1 through H2. Covers where the project started, what changed at each stage, current state, what works, what was tested, and what's next.
+Full context dump of the entire development history. A new Claude session should be able to read this document, CLAUDE.md, and the docs/ folder and pick up exactly where we left off. Every bug, fix, design decision, and architectural choice is documented here.
 
 ---
 
 ## Project Goal
 
 Build an automated sports arbitrage betting system that:
-1. Scans public odds APIs across DraftKings, FanDuel, and Pinnacle (15+ sports)
-2. Maintains an in-memory order book with 30-second freshness
+1. Scans public odds APIs across DraftKings, FanDuel, and Pinnacle (15+ sports) every 5 seconds
+2. Maintains an in-memory order book with 30-second freshness and diff-based updates
 3. Detects cross-venue arbitrage opportunities (sigma < 1.0 = guaranteed profit)
-4. Places both legs automatically via stealth browser sessions
-5. Runs autonomously with safety systems (drift check, circuit breaker, rate limiter)
+4. Places both legs automatically via stealth browser sessions (DK/FD) and direct HTTP (Pinnacle)
+5. Runs autonomously with a 14-layer safety filter chain including two-stage sigma revalidation
+6. Supports both pre-match and live (in-play) game arbitrage
+7. Region: Ontario, Canada (CA-ON)
 
 ---
 
-## History: Pre-H1 (Chrome Extension — Abandoned)
+## Architecture
 
-Before H1, the project used a Chrome extension architecture: an AWS server (`aws-server/server.js`) connected to a Chrome MV3 extension (`bridge-extension/`) via WebSocket. The extension injected content scripts into FanDuel and DraftKings tabs for API bet placement. This was abandoned because it was fragile — service worker sleep, WebSocket latency, CSP header stripping hacks, and required the user to manually load an unpacked extension.
+```
+sports-arb-h2/
+├── engine/           ← Rust (Tokio + Axum) — odds scanning, arb detection, execution
+├── bet-placer/       ← Node.js — WebSocket server, Patchright browser automation
+├── dk-proxy.js       ← DK TLS proxy for Windows (port 3403)
+└── data/             ← SQLite DB, browser profiles, cookies
+```
 
-## History: H1 (Patchright + Node.js Engine)
+### Communication Flow
+```
+Engine (port 3401) ──WS──► Bet Placer (port 3402) ──API──► FD/DK/PIN Sportsbooks
+Engine ──HTTP──► DK Proxy (port 3403) ──HTTPS──► DraftKings odds API
+Engine ──HTTP──► FanDuel odds API (direct, .ca domain for Ontario)
+Engine ──HTTP──► Pinnacle odds API (direct, guest API, no auth)
+```
 
-H1 replaced the Chrome extension entirely with Patchright (stealth Playwright fork that bypasses GeoComply automation detection). The entire system ran as a single Node.js process:
-- `aws-server/server.js` — Engine: NBA-only moneyline scanning, sigma calc, stake optimization
-- `src/browser-manager.js` — Patchright browser lifecycle
-- `src/sportsbooks/draftkings.js` — DK adapter (page.evaluate)
-- `src/sportsbooks/fanduel.js` — FD adapter (context.request.post)
-- `index.js` — CLI + scan/execute loop
-
-**H1 limitations:**
-- NBA moneylines only
-- Two sportsbooks only (DK + FD)
-- 30-second scan interval
-- No safety systems
-- No persistence or history
-- Single-process architecture
-
-### Key Bug Fix in H1
-FanDuel's `placeBet` originally used `page.evaluate(fetch(...))` which got blocked by PerimeterX (403 DSC-0015). Fixed by switching to `context.request.post()` (Node-side HTTP). This fix carries forward into H2.
-
-### H1 Test Results
-Both legs placed successfully with real money:
-- FD: Boston Celtics @1.465 (-215), $2 stake
-- DK: ATL Hawks @2.900 (+190), $0.84 stake
+### Three Processes
+1. **DK Proxy** (`node dk-proxy.js`, port 3403) — Rust's reqwest can't complete TLS handshake with DK's CDN on Windows. Node's `fetch()` handles it. Uses `.fetch()` not `https.get` (the latter had the same issue).
+2. **Bet Placer** (`node index.js`, port 3402) — Launches 3 Patchright Chrome windows (DK, FD, PIN). Receives bet commands from engine via WebSocket. Routes to correct adapter. Returns fill reports.
+3. **Engine** (`cargo run`, port 3401) — Polls odds, detects arbs, executes trades. REST API for settings/balances/stats. WebSocket broadcaster for real-time events.
 
 ---
 
-## History: Arb Engine V3 (Partner's Project)
+## History
 
-Separate Rust-based engine built by a partner at `C:\dev\arb-engine-v3`. Key features:
-- Rust + Tokio async runtime with 5-second polling
-- 15+ sports across 3 venues (DK, FD, Pinnacle)
-- Multiple market types (moneyline, spread, total, team_total)
-- In-memory order book with diff-based updates
-- Safety systems (circuit breaker, rate limiter, odds drift, rescue hedger)
-- SQLite persistence
-- Axum REST API + WebSocket broadcaster
-- Next.js dashboard
-- Paper trading + live trading via Redis pub/sub
+### Pre-H1: Chrome Extension (Abandoned)
+AWS server + Chrome MV3 extension via WebSocket. Content scripts in FD/DK tabs. Abandoned — fragile, service worker sleep, CSP hacking.
 
-**V3 limitations:**
-- Used Redis for live execution (unnecessary dependency)
-- Pinnacle was odds-only (no bet placement)
-- Dashboard was clunky
-- Venue substitution logic rarely profitable
+### H1: Patchright + Node.js Engine
+Single Node.js process. NBA moneylines only. DK + FD only. 30s scan interval. No safety systems. Key fix: FD `placeBet` switched from `page.evaluate(fetch())` to `context.request.post()` to bypass PerimeterX (403 DSC-0015).
 
----
+### V3: Partner's Rust Engine
+Rust + Tokio. 15+ sports, 3 venues. In-memory order book. Safety systems. SQLite. Redis pub/sub for live execution. Dashboard. Pinnacle odds-only (no bet placement).
 
-## What We Built in H2
+### H2: Merged Project (Current)
+Combined V3 Rust engine with H1 Node.js/Patchright automation. Key decisions:
+- Redis → WebSocket (eliminated dependency)
+- Added Pinnacle bet placement (built from HAR capture)
+- Removed dashboard (settings via env vars/API)
+- Removed venue substitution (rarely profitable)
 
-### Combining the Projects
-Merged the V3 Rust engine with H1's proven Node.js/Patchright browser automation. Key decisions:
-
-1. **Replaced Redis with WebSocket** — Direct WS connection between engine and bet placer. Eliminates Redis dependency with negligible latency impact (~3ms vs ~0.3ms, dwarfed by 200-500ms sportsbook API calls).
-
-2. **Removed venue substitution** — Pinnacle arbs didn't survive substitution to DK/FD. Kept Pinnacle odds scanning but removed the substitution logic.
-
-3. **Added Pinnacle bet placement** — Built a full Pinnacle adapter from HAR analysis. Quote -> Place -> Poll flow with header-based auth. Cleanest API of the three.
-
-4. **Live balance sync** — Engine fetches real sportsbook balances on startup and after each bet, replacing fake $1000 paper balances.
-
-5. **Removed dashboard** — Next.js dashboard removed from codebase. Engine settings configured via env vars or REST API.
-
-6. **DK proxy fix** — Rewrote dk-proxy.js to use Node's `fetch` instead of `https.get` (which had the same TLS issue as Rust's reqwest).
-
-### Changes Made
-
-| Component | Action | Detail |
-|-----------|--------|--------|
-| `engine/Cargo.toml` | EDIT | Replaced `redis` with `tokio-tungstenite` |
-| `engine/src/live_executor.rs` | REWRITE | Redis pub/sub -> WebSocket client. Added `fetch_balances()`, `drain_balance_updates()` |
-| `engine/src/main.rs` | EDIT | WS connection instead of Redis. Env var settings overrides. Live balance sync on startup. Removed venue substitution |
-| `engine/src/odds_fetcher.rs` | EDIT | DK proxy port 3402->3403. Pinnacle `venue_market_id` now adapter-ready format |
-| `engine/.cargo/config.toml` | EDIT | Fixed MSVC linker path for local machine |
-| `bet-placer/` | NEW | WebSocket server + Patchright browsers + DK/FD/PIN adapters |
-| `bet-placer/src/sportsbooks/pinnacle.js` | NEW | Full Pinnacle adapter: quote -> place -> poll |
-| `dk-proxy.js` | NEW | DK TLS proxy using fetch (port 3403) |
-| `dashboard/` | REMOVED | Entirely removed from codebase |
-
-### Testing Results
-
-Successfully placed live arb bets:
-- DraftKings: $1.27 CAD wager, $7.30 CAD potential payout
-- Pinnacle: $0.73 CAD stake, $7.33 CAD potential payout
-- Both legs on the same game, opposite sides — guaranteed ~$7.30 return on $2.00 total stake
+### V4 Merge: Partner's Safety Improvements
+Merged 17 safety improvements from partner's V4 engine update into H2.
 
 ---
 
-## Current State
+## Bet Placement Methods
 
-### What Works
-- 3-venue odds scanning (DK via proxy, FD direct, PIN direct) every 5 seconds
-- 15+ sports: NBA, NHL, MLB, NFL, NCAAB, NCAAF, EPL, La Liga, Serie A, Bundesliga, Ligue 1, UCL, MLS, UFC
-- Multi-market: moneyline, spread, total, team_total
-- Arb detection across all venue combinations (DK-FD, DK-PIN, FD-PIN)
-- Live bet execution via WebSocket to bet placer
-- All three adapters working: DraftKings, FanDuel, Pinnacle
-- Real balance sync from sportsbooks to engine
-- Safety: odds drift verification, circuit breaker, rate limiter
-- Engine settings via env vars or REST API
-- Session persistence (browser profiles survive restarts)
+### DraftKings (`draftkings.js`)
+- **Transport**: `page.evaluate(fetch())` with `credentials: "include"` — browser cookies sent automatically
+- **Flow**: getSelectionInfo → calculateBets (returns `token` + `calculationId`) → placeBet → waitForConfirmation (poll up to 15s)
+- **Host**: `gaming-ca-on.draftkings.com/api/wager/v1`
+- **Selection ID**: `0ML{marketId}_{outcomeIndex}` (e.g., `0ML84036019_3`)
+- **Auth**: HttpOnly browser cookies via `credentials: "include"`
+- **XPP filter**: DraftKings Crowns (XPP) filtered from balance — not real currency
 
-### User Accounts
-- DraftKings: `hhayaan`, ~$6.92 CAD
-- FanDuel: `alveebaba`, ~$19.65 CAD
-- Pinnacle: `HA1963952`, ~$3,932 CAD
+### FanDuel (`fanduel.js`)
+- **Transport**: `context.request.post()` — Node-side HTTP, bypasses PerimeterX CORS
+- **Flow**: getMarketPrices → implyBets (returns `betReference`) → placeBet
+- **Hosts**: `sib.on.sportsbook.fanduel.ca` (imply), `spb.on.sportsbook.fanduel.ca` (place), `smp.on.sportsbook.fanduel.ca` (prices)
+- **Selection ID**: `{marketId}:{selectionId}` (e.g., `801.161172464:60427`)
+- **Auth**: JWT from `localStorage["session-sportsbook"]`, geo token from `localStorage["location_token"]`, PerimeterX cookies via `context.cookies()`
+- **Currency**: Hardcoded to CAD (Ontario)
+- **Critical**: `handicap` must always be included in runner object, even for moneylines (use `0`)
 
-### Config (Current Test Values)
-- FIXED_STAKE: $1.00
-- MAX_STAKE: $2.00
-- MIN_ARB_PCT: 0.1%
-- Region: Ontario (CA-ON)
+### Pinnacle (`pinnacle.js`) — Hybrid Adapter
+- **Transport**: Direct `fetch()` with tokens extracted from browser localStorage. Browser stays open as token source only — not used for HTTP requests. Faster than `context.request`.
+- **Token refresh**: Auto-reads `localStorage["Main:User"]` every 5 minutes for `deviceId` and `token`
+- **Flow**: quote (returns `marketId` + `price` + `minRiskStake`/`maxRiskStake`) → place (returns `PENDING_ACCEPTANCE`) → poll `GET /bets?requestIds=` until accepted (~7-8s)
+- **Host**: `api.arcadia.pinnacle.com/0.1`
+- **Selection ID**: `{matchupId}:{marketKey}:{designation}` (e.g., `1627197304:s;0;m:home`)
+- **Auth**: `x-api-key` (static: `CmX2KcMrXuFmNg6YFbmTxE0y9CIrOi0R`), `x-device-uuid`, `x-session`
+- **Min stake**: ~$0.81 CAD (varies per market, obtained from quote response)
 
 ---
 
-## Post-Launch Fixes
+## 14-Layer Safety Filter Chain (in order)
 
-### Draw/3-Way Moneyline Bug (Critical)
-The engine was detecting 40-70% "arbs" on soccer moneylines that were actually pairing a team win with a draw. Soccer moneylines are 3-way (home/draw/away) — a 2-leg arb only covers 2 of 3 outcomes, leaving the third unhedged (100% loss).
+1. **3-way sport ML block** — Soccer moneylines have 3 outcomes (home/draw/away). 2-leg arb only covers 2, third loses both. Sports: SOCCER, EPL, LA_LIGA, SERIE_A, BUNDESLIGA, LIGUE_1, UCL, MLS.
+2. **Partial-period ML block** — Only full_game moneylines allowed. F3/F5/1st half MLs can tie.
+3. **Per-venue vig check** — Each venue's implied probability sum must be 0.95-1.25. Outside = misclassified market (3-way as 2-way, wrong period, doubleheader collision).
+4. **Spread line sign check** — Requires opposite signs (-1.5 vs +1.5). Same sign = both can lose.
+5. **Require Pinnacle leg** — `require_pinnacle_leg = true`. DK-FD arbs blocked (lost money on those).
+6. **Circuit breaker** — Pauses trading on cumulative loss or high rejection rate.
+7. **Rate limiter** — Per-venue sliding window bet limit.
+8. **Odds drift** — Rejects if odds moved >5% since detection.
+9. **>15% arb warning** — Logs `[HIGH%]` but doesn't block.
+10. **Time-to-start** — Skips events beyond `MAX_HOURS_TO_START` (default 6h) to prevent capital lockup.
+11. **Balance-aware stake scaling** — Scales down stakes to fit venue balances instead of rejecting.
+12. **Quote sigma revalidation** — After Pinnacle quote returns current price, recalculates sigma. Aborts if >= 1.0.
+13. **Post-fill sigma revalidation** — After leg 1 fills at actual odds, recalculates sigma. Aborts leg 2 if >= 1.0 (one-sided exposure better than guaranteed loss).
+14. **60-second dedup cooldown** — Prevents re-trading same event/market/venue pair.
 
-**Root cause**: The team name normalizer (`team_names.rs`) turned "Draw" into `"DRAW"` (uppercased), but the arb detector checked for lowercase `"draw"`.
+---
 
-**Two-layer fix**:
-1. `team_names.rs` — `normalize_selection()` now catches "Draw"/"The Draw"/"Tie" and returns consistent lowercase `"draw"` before they reach the team normalizer
-2. `arb_detector.rs` — `are_selections_complementary()` excludes `"draw"` from moneyline pairing
+## Execution Order
 
-### DK Proxy Fix
-The original dk-proxy.js used Node's `https.get` which had the same TLS issue as Rust's reqwest. Rewrote to use `fetch()` which handles DK's TLS correctly.
+Soft book FIRST, Pinnacle second. Pre-flight quote runs before any bets.
 
-### FanDuel Currency Fix
-FD balance was showing "USD" instead of "CAD". Hardcoded to CAD for Ontario region.
+1. Engine detects arb
+2. If Pinnacle is involved: send `quote_bet` to get min/max stakes and current price
+3. **Quote sigma revalidation** — abort if sigma >= 1.0 at quoted price
+4. Adjust stakes to fit Pinnacle min/max while maintaining arb ratio
+5. **Place leg 1** (FD or DK — soft book). If rejected = zero exposure.
+6. **Post-fill sigma revalidation** — abort leg 2 if sigma >= 1.0 at actual fill odds
+7. **Place leg 2** (Pinnacle). Almost never rejects.
+8. Both filled → calculate P&L, record trade, update balances
 
-### DK XPP (Crowns) Filter
-DK was showing XPP (DraftKings Crowns) balance alongside CAD. Filtered out — XPP is not real currency.
+---
 
-### Pinnacle Token Fix
-Initial Pinnacle adapter couldn't find session tokens — was scanning all localStorage keys. Fixed to read directly from `localStorage["Main:User"]` which contains `token` and `deviceId`.
+## Engine Configuration
 
-### V3 Engine Merge (Completed)
-Merged the following from partner's V3 engine:
-- **3-way moneyline sport blocking** — `THREE_WAY_SPORTS` list blocks all 2-leg soccer moneyline arbs (EPL, La Liga, Serie A, Bundesliga, Ligue 1, UCL, MLS)
-- **Player prop data model** — `player_name`, `prop_type` fields on CanonicalMarket, `player_key` on MarketIdentityKey
-- **Player prop parsing** — `normalize_player()`, `parse_player_prop()` in team_names.rs
-- **Epoch date parsing** — `extract_date()` handles epoch milliseconds
-- **Hash fallback** — `canonical_event_id()` uses hash when date can't be parsed
-- **FD_STATES fixed** — changed from `["nj", "mi"]` to `["on"]` for Ontario
-- **Alt market types** — `alt_total`, `alt_spread`, `player_prop` added to arb detector
-- **FD URL fix** — changed `.com` to `.ca` for Ontario API endpoints
+### Env Vars
+| Var | Default | Description |
+|-----|---------|-------------|
+| `LIVE_MODE` | `0` | `1` = real bets |
+| `FIXED_STAKE` | `25` | $ per leg |
+| `MAX_STAKE` | `50` | Cap per leg |
+| `MIN_ARB_PCT` | `0.5` | Min profit % to trigger |
+| `STAKE_MODE` | `fixed` | `fixed` or `proportional` |
+| `PROPORTIONAL_PCT` | `5` | % of balance |
+| `ENABLED` | `true` | `false` = scan only |
+| `MAX_HOURS_TO_START` | `6` | Max hours before event start |
+| `BALANCE_REFRESH_CYCLES` | `60` | Periodic balance sync interval (cycles) |
 
-### Spread Line Matching Bug (Critical)
-NHL spread arbs were showing 34-38% — impossible for real arbs. Root cause: spread markets have signed lines (+1.5 for underdog, -1.5 for favorite). The `MarketIdentityKey` grouped by signed line, so same-side bets from different venues were in separate groups and paired as if complementary.
+### Hardcoded Values
+- `require_pinnacle_leg = true` — cannot be changed via env var
+- `POLL_INTERVAL_SECS = 5`
+- `MAX_DATA_AGE_MS = 30,000` (30s)
+- Odds drift threshold: 5%
+- Vig check range: 0.95-1.25
+- Fill timeout: 20s per leg
+- Token refresh: 5 min (Pinnacle)
+- Keepalive: 5 min (FD/DK browser reload)
 
-**Fix**: `line_key` now uses absolute value for spread markets: `format!("{:.1}", l.abs())`. Both sides group together, and the complementarity check correctly pairs favorite vs underdog.
+---
 
-### Book Expiry Bug
-The book dropped from ~12,000 entries to ~700 after the first scan cycle. The diff-based update system only called `book.update()` for changed entries. Unchanged entries kept stale timestamps and expired after 30 seconds.
+## In-Memory Order Book
 
-**Fix**: Added `book.touch()` method that refreshes timestamps on unchanged entries without overwriting odds.
+Two-level HashMap: `MarketIdentityKey → VenueSelectionKey → PriceEntry`
 
-### Pinnacle Minimum Stake Fix
-Pinnacle has per-market minimum bet amounts (~$0.81 CAD). The engine was calculating stakes below this, causing rejection and one-sided exposure.
+### MarketIdentityKey
+- `event_id` — canonical: `{SPORT}:{DATE}T{HOUR}:{TEAMA}-vs-{TEAMB}` (alphabetically sorted, hour included for doubleheader disambiguation)
+- `market_type` — `moneyline`, `spread`, `alt_spread`, `total`, `alt_total`, `team_total`, `player_prop`
+- `line_key` — `format!("{:.1}", line)`, uses `abs()` for spreads so +1.5 and -1.5 group together
+- `period` — `full_game`, `first_half`, `second_half`, `first_3_innings`, `regulation`, etc. (Pinnacle periods 0-9 mapped)
+- `is_live` — **always false** (DK hardcodes false, PIN uses true for same live game — using actual value breaks pairing)
+- `player_key` — empty for non-player markets, `"lastname:proptype"` for player props
 
-**Fix**: Pre-flight quote system. Before placing any bets, the engine sends a `quote_bet` request to the bet placer for the Pinnacle leg. The quote returns `minRiskStake` and `maxRiskStake` from Pinnacle's API. The engine then:
-1. Bumps the Pinnacle stake up to the minimum if too low
-2. Caps at the maximum if too high
-3. Recalculates the other leg to maintain the correct arb ratio
-4. Verifies the adjusted total still fits within `MAX_STAKE`
-5. Only then places both legs
+### Diff-Based Updates
+Only entries where odds actually changed get written to the book. Unchanged entries get `book.touch()` to refresh their timestamp and prevent expiry. This was a critical bug fix — without touch(), the book dropped from ~12,000 to ~700 entries after the first cycle.
 
-### Leg Ordering Fix
-Changed from "FanDuel always first" to: Pinnacle first (needs pre-flight quote) -> FanDuel first (soft book) -> DraftKings. This ensures the quote check happens before any bets are placed.
+---
 
-### Pinnacle Alternate Lines Filter
-NHL spread arbs were still showing 34-38% after the abs line fix. Root cause: Pinnacle returns alternate spread lines (`isAlternate: true`) at different odds than the main line. These were being paired against FD/DK main lines.
+## Bugs Fixed (Chronological)
 
-**Fix**: Filter out `isAlternate: true` markets from Pinnacle. Only main lines are imported. Pinnacle's market count dropped from ~1,500 to ~750 per sport (alternates removed). Alternates can be re-enabled later if DK/FD alternate scanning is added.
+1. **FD DSC-0015** — `page.evaluate(fetch())` blocked by PerimeterX. Fixed with `context.request.post()`. (H1)
+2. **Draw/3-way moneyline** — 40-70% fake arbs pairing team win with draw on soccer. Fixed: draw normalization in `team_names.rs` + `THREE_WAY_SPORTS` blocking in `arb_detector.rs`.
+3. **DK proxy TLS** — `https.get` had same TLS issue as Rust reqwest. Rewrote to use `fetch()`.
+4. **FD currency** — Showed "USD" instead of "CAD". Hardcoded to CAD for Ontario.
+5. **DK XPP** — DraftKings Crowns showing in balance. Filtered out (`currencyCode !== "XPP"`).
+6. **Pinnacle token extraction** — Was scanning all localStorage keys. Fixed to read `localStorage["Main:User"]` directly.
+7. **FD URL domain** — Was `.com`, should be `.ca` for Ontario. Fixed in odds_fetcher.rs.
+8. **Spread line matching** — 34-38% fake NHL spread arbs. Same-side bets paired as complementary. Fixed: `line_key` uses `abs()` for spreads.
+9. **Book expiry** — Dropped from 12K to 700 entries. Diff system didn't refresh timestamps on unchanged entries. Fixed: `book.touch()`.
+10. **Pinnacle min stake** — Below-minimum stakes rejected, causing one-sided exposure. Fixed: pre-flight quote with stake adjustment.
+11. **Pinnacle alternates** — Alternate spread lines at different odds paired against main lines. Fixed: `isAlternate` filter.
+12. **is_live mismatch** — DK=false, PIN=true for same live game. Fixed: always false in MarketIdentityKey.
+13. **Doubleheader collision** — Same teams, same day, different times got same event ID. Fixed: `extract_date()` includes hour.
 
-### V4 Engine Merge (Completed)
-Merged partner's V4 engine improvements into H2:
+---
 
-**Safety filters added:**
-- **Per-venue vig check** — validates implied probability 0.95-1.25 per venue before pairing. Catches misclassified markets (3-way as 2-way, wrong period, doubleheader collisions).
-- **Partial-period ML block** — blocks non-full-game moneylines (F3/F5/1st half MLs can tie)
-- **Spread line sign validation** — requires opposite signs (-1.5 vs +1.5) to prevent same-side pairing
-- **>15% arb warning** — logs `[HIGH%]` but doesn't block (root cause fixes handle it)
-- **require_pinnacle_leg = true** — DK-FD arbs blocked after losing money on them
-- **Time-to-start filter** — skips events >6h away (capital lockup) and <2min (suspension risk)
+## User Accounts
+- DraftKings: `hhayaan` (Ontario)
+- FanDuel: `alveebaba` (Ontario)
+- Pinnacle: `HA1963952` (Ontario, pinnacle.ca)
 
-**Execution improvements:**
-- **Quote sigma revalidation** — after Pinnacle quote returns current price, recalculates sigma. Aborts if >= 1.0 (arb closed).
-- **Post-fill sigma revalidation** — after leg 1 fills at actual odds, recalculates sigma. Aborts leg 2 if >= 1.0 (one-sided exposure better than guaranteed loss).
-- **Soft-book-first ordering** — FD/DK first, Pinnacle second. If soft book rejects = zero exposure.
-- **Balance-aware stake scaling** — `compute_stakes_with_balances()` scales down stakes to fit venue balances instead of rejecting.
-- **Periodic balance refresh** — every 60 cycles (~5 min) re-fetches real balances from sportsbooks.
+---
 
-**Data integrity fixes:**
-- **is_live always false** in MarketIdentityKey — DK hardcodes false, PIN uses true for same live game. Using actual value broke cross-venue live game pairing.
-- **Doubleheader fix** — `extract_date()` includes hour (`2026-03-15T19`) to disambiguate G1/G2.
-- **DK alt market detection** — `resolve_dk_market_type(label, is_main)` separates alt_spread/alt_total.
-- **Pinnacle period mapping 0-9** — all periods explicitly mapped (F3, regulation, individual innings).
-- **Odds drift widened** — 3% → 5% (was rejecting valid arbs)
-
-**Pinnacle hybrid adapter:**
-- Browser launches for token extraction (auto, no manual env vars)
-- API calls use direct `fetch()` instead of `context.request` (faster)
-- Tokens auto-refresh from browser localStorage every 5 minutes
+## MSVC Build Configuration
+The engine requires Visual Studio 2026 MSVC linker. Path is hardcoded in `engine/.cargo/config.toml`:
+- Linker: `C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.50.35717\bin\Hostx64\x64\link.exe`
+- Windows SDK: `10.0.26100.0`
+- If the linker path changes (VS update), update `engine/.cargo/config.toml`
 
 ---
 
@@ -234,78 +212,119 @@ Merged partner's V4 engine improvements into H2:
 
 | Issue | Status |
 |-------|--------|
-| **One-sided exposure** | Mitigated — pre-flight quote + quote sigma revalidation prevent most cases. Post-fill sigma revalidation can intentionally cause it (better than guaranteed loss). Rescue hedger exists but not wired up. |
-| DK TLS on Windows | Mitigated via dk-proxy.js (using fetch) |
+| **One-sided exposure** | Mitigated — pre-flight quote + two-stage sigma revalidation prevent most cases. Post-fill sigma can intentionally cause it. Rescue hedger exists (`rescue_hedger.rs`) but not wired up. |
+| DK TLS on Windows | Mitigated via dk-proxy.js |
 | FD sessions expire ~13 min | Keepalive refreshes every 5 min, may still expire |
 | DK/FD max stake limits unknown | Soft books may limit max bet amounts per user. Partner working on detection. |
-| DK-FD arbs blocked | `require_pinnacle_leg=true` — these lost money. All arbs must have Pinnacle on one side. |
-| NFL/NCAAF DK fetches fail | Offseason — expected, harmless warnings |
-| PIN MLB occasional 401 | Pinnacle sometimes returns Unauthorized for specific leagues. Retries next cycle. |
-
----
-
-## Future Roadmap
-
-### Immediate: DK/FD Limit Detection
-- Detect and handle DK/FD maximum stake limits (soft book user limiting)
-- Add pre-flight quote for DK/FD when their APIs support it
-
-### Phase 1: Reliability & Recovery
-- **Odds changed** — re-fetch, recalculate, retry if still profitable
-- **Session expired** — detect 401, auto-refresh or alert
-- **Partial fill** — one leg placed, other failed -> rescue hedger (code exists, not wired up)
-- **Rate limiting** — back off with exponential delay
-- **Token refresh** — FD auth ~13 min, geo ~20 min, PIN session ~6 hours
-
-### Phase 2: Additional Sportsbooks
-- **BetMGM** — Uses vnauth + SSO + XSRF token auth
-- **ESPN BET / TheScore** — GraphQL API
-- **PointsBet**
-- **Betano**
-
-Each needs: HAR capture, API reverse engineering, adapter implementation, registration.
-
-### Phase 3: Engine Improvements
-- Wire up rescue hedger for one-sided exposure recovery
-- Wire up policy gates for pre-trade validation
-- Wire up state machine for trade lifecycle tracking
-- Wire up structured trade logging
-- Kelly criterion stake sizing
-- Bet history logging and P&L tracking
-- Auto-retry on transient failures
-- Player prop arb detection
-
-### Phase 4: Infrastructure
-- Deploy engine to cloud (AWS/GCP) for 24/7 operation
-- Alerting (Telegram/Discord) for trades, errors, exposure
-- Performance monitoring and latency tracking
-- Multi-region support (US states beyond Ontario)
+| DK-FD arbs blocked | `require_pinnacle_leg=true` — these lost money |
+| NFL/NCAAF DK fetches fail | Offseason — expected, harmless |
+| PIN MLB occasional 401 | Retries next cycle |
+| Unused engine modules | `treasury.rs`, `state_machine.rs`, `rescue_hedger.rs`, `policy.rs`, `trades.rs` — written for future use, not wired into main loop. Zero runtime cost. |
 
 ---
 
 ## How to Run
 
+### Paper Trading (scan only, no browsers needed)
 ```powershell
 # Terminal 1: DK Proxy
-cd C:\dev\sports-arb-h2; node dk-proxy.js
+cd C:\dev\sportsbook_arbitrage; node dk-proxy.js
 
-# Terminal 2: Bet Placer
-cd C:\dev\sports-arb-h2\bet-placer; node index.js
-# Log in to DK, FD, PIN. Type "balance" to verify.
+# Terminal 2: Engine
+cd C:\dev\sportsbook_arbitrage\engine; $env:ENABLED="false"; cargo run
+```
 
-# Terminal 3: Engine (live mode)
-cd C:\dev\sports-arb-h2\engine; $env:LIVE_MODE="1"; $env:FIXED_STAKE="1"; $env:MAX_STAKE="2"; $env:MIN_ARB_PCT="0.1"; cargo run
+### Live Trading
+```powershell
+# Terminal 1: DK Proxy
+cd C:\dev\sportsbook_arbitrage; node dk-proxy.js
+
+# Terminal 2: Bet Placer (opens 3 Chrome windows)
+cd C:\dev\sportsbook_arbitrage\bet-placer; node index.js
+# Log in to DK, FD, PIN. Type "balance" to verify all 3.
+
+# Terminal 3: Engine
+cd C:\dev\sportsbook_arbitrage\engine; $env:LIVE_MODE="1"; $env:FIXED_STAKE="0.50"; $env:MAX_STAKE="2"; $env:MIN_ARB_PCT="0.5"; $env:ENABLED="true"; cargo run
+```
+
+### REST API (while engine is running)
+```powershell
+Invoke-RestMethod http://localhost:3401/api/settings
+Invoke-RestMethod http://localhost:3401/api/balances
+Invoke-RestMethod http://localhost:3401/api/trades
+Invoke-RestMethod http://localhost:3401/api/stats
 ```
 
 ---
 
-## Important Notes for Next Session
+## WebSocket Protocol (Engine ↔ Bet Placer)
 
-1. **GeoComply PLC must be running** for FanDuel geo verification
-2. **All three browsers must be logged in** before starting the engine in live mode
-3. **Start bet placer before engine** — engine connects to WS on startup
-4. **DK proxy must be running** — Rust can't fetch DK directly on Windows
-5. **True arbs between soft books (DK-FD) are rare** — most arbs involve Pinnacle
-6. **Pinnacle is a sharp book** — their odds are closest to true probability, creating more arb opportunities against soft books
-7. **Odds are locked at placement** — payouts don't change after the bet is placed, regardless of future odds movement
-8. **Engine code has unused safety modules** (treasury, state_machine, rescue_hedger, policy, trades) — written for future use, not wired into main loop yet. They compile out with zero runtime cost.
+### Engine → Bet Placer
+```json
+{"type":"place_bet","attempt_id":"uuid-L1","venue":"fanduel","venue_market_id":"801.161172464:60427","selection":"BOS","stake":12.50,"expected_odds":1.95}
+{"type":"quote_bet","attempt_id":"uuid-Q","venue":"pinnacle","venue_market_id":"1627197304:s;0;m:home"}
+{"type":"get_balances"}
+{"type":"ping"}
+```
+
+### Bet Placer → Engine
+```json
+{"type":"fill_report","attempt_id":"uuid-L1","status":"filled","accepted_stake":12.50,"accepted_odds":1.95,"error_message":null}
+{"type":"quote_result","attempt_id":"uuid-Q","status":"ok","min_stake":0.81,"max_stake":10180.31,"price":1.95}
+{"type":"balances","balances":[{"venue":"draftkings","balance":6.48},{"venue":"fanduel","balance":19.65},{"venue":"pinnacle","balance":25.00}]}
+{"type":"balance_update","venue":"pinnacle","balance":24.54}
+{"type":"pong"}
+```
+
+---
+
+## Partner's Projects (Reference)
+- `C:\dev\sports-arb-h1` — Original H1 Node.js project (source of automation code)
+- `C:\dev\arb-engine-v3` — Partner's V3 Rust engine (source of initial engine)
+- `C:\dev\sports-arb-v4` — Partner's V4 engine update (source of safety improvements)
+- `C:\dev\sportsbook_browser_automation` — Standalone browser automation (pre-H1)
+
+---
+
+## Critical Rules for Next Session
+
+1. **Start bet placer BEFORE engine** — engine connects WS on startup, fails if bet placer isn't running
+2. **DK proxy must be running** — Rust can't fetch DK directly on Windows
+3. **GeoComply PLC must be running** for FanDuel geo verification
+4. **User must be logged in** to all 3 sportsbooks in the browser windows before starting engine
+5. **Never commit** browser profiles, cookies, or auth tokens
+6. **Region is Ontario (CA-ON)** — all API endpoints use Ontario/Canadian domains
+7. **FD uses `.ca` domain**, not `.com`
+8. **Pinnacle URL is `pinnacle.ca`**, not `pinnacle.com`
+9. **is_live is always false** in MarketIdentityKey — intentional, do not change
+10. **require_pinnacle_leg is hardcoded true** — DK-FD arbs lost money
+11. **Odds are locked at placement** — payouts don't change regardless of future odds movement
+12. **The codebase must stay LEAN** — no bloat, no unnecessary abstractions, minimal latency
+13. **MSVC linker path** in `engine/.cargo/config.toml` must match installed Visual Studio version
+
+---
+
+## Future Roadmap
+
+### Immediate
+- Detect and handle DK/FD maximum stake limits (soft book user limiting)
+- Wire up rescue hedger for one-sided exposure recovery
+
+### Phase 1: Reliability
+- Session expired detection (401) with auto-refresh or alert
+- WebSocket reconnection on disconnect
+- Auto-retry on transient failures
+
+### Phase 2: More Sportsbooks
+- BetMGM, ESPN BET/TheScore, PointsBet, Betano
+- Each needs: HAR capture, API reverse engineering, adapter implementation
+
+### Phase 3: More Markets
+- Player prop arb detection (data model ready, parsing ready, not tested)
+- Re-enable Pinnacle alternates when DK/FD alt scanning is added
+- DNB/Asian Handicap parsing for soccer (2-way soccer markets)
+
+### Phase 4: Infrastructure
+- Deploy to cloud for 24/7 operation
+- Alerting (Telegram/Discord) for trades, errors, exposure
+- Multi-region support (US states beyond Ontario)
