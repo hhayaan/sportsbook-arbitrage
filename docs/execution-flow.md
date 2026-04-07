@@ -97,8 +97,9 @@ All settable via environment variables at launch:
 | `STAKE_MODE` | `fixed` | `fixed` or `proportional` |
 | `PROPORTIONAL_PCT` | `5` | % of balance per trade |
 | `ENABLED` | `true` | `false` = scan only |
-| `MAX_HOURS_TO_START` | `24` | Max hours before event start (capital lockup prevention) |
+| `MAX_HOURS_TO_START` | `24` | Max hours before pre-game event start (capital lockup prevention) |
 | `BALANCE_REFRESH_CYCLES` | `60` | Periodic balance sync interval (~5 min at 5s polling) |
+| `SKIP_LIVE` | `0` | `1` = skip all live (in-play) games, only scan pre-game |
 | `WS_URL` | `ws://127.0.0.1:3402` | Bet placer address |
 
 ## Sports Covered

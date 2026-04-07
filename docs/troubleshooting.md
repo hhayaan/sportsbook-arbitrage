@@ -70,6 +70,17 @@
 1. `team_names.rs` — `normalize_selection()` now catches "Draw", "The Draw", "Tie" and normalizes them to lowercase `"draw"` before they reach the team name normalizer (which would turn them into `"DRAW"` or `"DRA"`).
 2. `arb_detector.rs` — `are_selections_complementary()` excludes `"draw"` from moneyline pairing. Only team-vs-team pairs are valid 2-way arbs.
 
+### Phantom NHL/MLB/NBA arbs (5-30%) from period mismatches
+**Cause**: Sportsbooks return moneylines for multiple periods (full game, halves, quarters, individual innings, regulation-only). If the parser collapses different periods into one bucket, the partial-period odds get paired against full-game odds and create fake arbs.
+- **Pinnacle**: returns periods 0-9 (`s;0;m`, `s;1;m`, `s;6;m`, etc.). Period 6 = NHL regulation/3-way.
+- **FanDuel**: returns both `Moneyline` (2-way OT-included) and `60 Min Moneyline (3 Way)` for NHL.
+- **Pre-V4 bug**: only mapped Pinnacle periods 0-2, defaulted everything else to `full_game`. This corrupted the order book.
+**Fix**: `odds_fetcher.rs` now maps all Pinnacle periods (0-9) explicitly. `detect_period` matches `"60 min"`, `"3 way"`, `"3-way"` → `regulation`. The partial-period ML filter (`period != "full_game"`) then blocks them.
+
+### Vig check (removed)
+**Background**: V4 added a per-venue vig self-consistency check (rejected markets where 2-way implied probability sum was outside 0.95-1.25). It was a catch-all for misclassified markets but blocked legitimate arbs with unusual odds.
+**Resolution**: Removed entirely. The period-based filters catch the underlying mismatches more cleanly.
+
 ### 34-38% NHL spread arbs (fake arbs)
 **Cause**: Spread markets have signed lines (+1.5 underdog, -1.5 favorite). The `MarketIdentityKey` grouped by signed `line_key`, so same-side bets from different venues ended up in separate groups. The arb detector saw different team names and paired them as if complementary — but they were the same side of the same spread.
 **Fix**: `models.rs` — `line_key` now uses `l.abs()` for spread markets, grouping both sides together. The complementarity check then correctly pairs favorite vs underdog.

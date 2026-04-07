@@ -31,15 +31,16 @@ cd C:\dev\sportsbook-arbitrage\engine; $env:LIVE_MODE="1"; $env:FIXED_STAKE="1";
 | `STAKE_MODE` | `fixed` | `fixed` or `proportional` |
 | `PROPORTIONAL_PCT` | `5` | % of balance |
 | `ENABLED` | `true` | `false` = scan only |
-| `MAX_HOURS_TO_START` | `24` | Max hours before event start |
+| `MAX_HOURS_TO_START` | `24` | Max hours before event start (pre-game only) |
 | `BALANCE_REFRESH_CYCLES` | `60` | Periodic balance sync interval (cycles) |
+| `SKIP_LIVE` | `0` | `1` = skip all live (in-play) games, only scan pre-game |
 
 ## Key Files
 | File | Purpose |
 |------|---------|
 | `engine/src/main.rs` | Entry point, polling loop, execution |
 | `engine/src/odds_fetcher.rs` | DK/FD/PIN odds fetchers |
-| `engine/src/arb_detector.rs` | Sigma calc, cross-venue detection, vig check, safety filters |
+| `engine/src/arb_detector.rs` | Sigma calc, cross-venue detection, safety filters |
 | `engine/src/live_executor.rs` | WebSocket bet execution, balance-aware scaling, sigma revalidation |
 | `engine/src/models.rs` | Order book, data structures |
 | `engine/src/config.rs` | Sports, leagues, API hosts |
@@ -71,15 +72,15 @@ Soft book FIRST, Pinnacle second. FD or DK places first; Pinnacle places second.
 
 ## Safety Filters (in order)
 1. 3-way sport ML block (soccer — home/draw/away not valid 2-leg arb)
-2. Partial-period ML block (full_game only for moneylines)
-3. Per-venue vig self-consistency check (0.95-1.25 range)
-4. Spread line sign check (opposite signs only)
-5. Require Pinnacle leg (DK-FD arbs blocked — lost money on those)
-6. Circuit breaker (cumulative loss or rejection rate)
-7. Rate limiter (per-venue sliding window)
-8. Odds drift (5% threshold)
-9. >15% arb warning [HIGH%] (log only, doesn't block)
-10. Time-to-start (skip events beyond MAX_HOURS_TO_START)
+2. Partial-period ML block (full_game only for moneylines — also catches FD "60 Min Moneyline (3 Way)" via `detect_period`)
+3. Spread line sign check (opposite signs only)
+4. Require Pinnacle leg (DK-FD arbs blocked — lost money on those)
+5. Circuit breaker (cumulative loss or rejection rate)
+6. Rate limiter (per-venue sliding window, 200 bets/hour)
+7. Odds drift (5% threshold)
+8. >15% arb warning [HIGH%] (log only, doesn't block)
+9. SKIP_LIVE filter (drops all live games when enabled)
+10. Time-to-start (pre-game only — skip events beyond MAX_HOURS_TO_START)
 11. Balance-aware stake scaling (scales down to fit venue balances)
 12. Quote sigma revalidation (abort if sigma >= 1.0 after PIN quote)
 13. Post-fill sigma revalidation (abort leg 2 if sigma >= 1.0 after leg 1 fills)

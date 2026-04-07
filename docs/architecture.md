@@ -46,7 +46,7 @@ The brain of the system. Runs a Tokio async runtime with:
 
 - **Odds Fetcher** (`odds_fetcher.rs`) — Concurrent HTTP fetchers for DK (via proxy), FD, and Pinnacle. Fetches 15+ endpoints in parallel every 5 seconds.
 - **Order Book** (`models.rs`) — Two-level HashMap: `MarketIdentityKey -> VenueSelectionKey -> PriceEntry`. Groups the same bet across venues for comparison.
-- **Arb Detector** (`arb_detector.rs`) — 14-layer safety filter chain. Blocks 3-way soccer moneylines, partial-period MLs, checks per-venue vig consistency (0.95-1.25), validates spread sign complementarity, requires Pinnacle leg, warns on >15% arbs. Supports moneyline, spread, total, alt_spread, alt_total, player_prop.
+- **Arb Detector** (`arb_detector.rs`) — Safety filter chain. Blocks 3-way soccer moneylines, partial-period MLs (which now also catches FD's "60 Min Moneyline (3 Way)" via the period mapping), validates spread sign complementarity, requires Pinnacle leg. Supports moneyline, spread, total, alt_spread, alt_total, player_prop.
 - **Team Names** (`team_names.rs`) — 200+ team name normalizations. Draw normalization. Player prop parsing. Event IDs include hour for doubleheader disambiguation. Epoch date parsing with hash fallback.
 - **Stake Optimizer** (`stake_optimizer.rs`) — Proportional stake sizing with balance-aware scaling. Scales down to fit venue balances instead of rejecting.
 - **Live Executor** (`live_executor.rs`) — WebSocket bet execution. Soft-book-first ordering. Two-stage sigma revalidation (quote + post-fill). Pre-flight Pinnacle quote with stake adjustment. 20s fill timeout.

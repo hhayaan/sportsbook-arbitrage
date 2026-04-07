@@ -70,12 +70,14 @@ async fn main() {
         .ok().and_then(|v| v.parse().ok()).unwrap_or(24);
     let balance_refresh_cycles: u64 = std::env::var("BALANCE_REFRESH_CYCLES")
         .ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+    let skip_live: bool = std::env::var("SKIP_LIVE")
+        .map(|v| v == "1" || v == "true").unwrap_or(false);
 
     tracing::info!(
-        "Settings: enabled={} stake_mode={} fixed_stake=${:.2} max_stake=${:.2} min_arb_pct={:.1}% max_hours={}",
+        "Settings: enabled={} stake_mode={} fixed_stake=${:.2} max_stake=${:.2} min_arb_pct={:.1}% max_hours={} skip_live={}",
         settings_overrides.enabled, settings_overrides.stake_mode,
         settings_overrides.fixed_stake, settings_overrides.max_stake, settings_overrides.min_arb_pct,
-        max_hours_to_start
+        max_hours_to_start, skip_live
     );
 
     // Init WebSocket broadcaster
@@ -256,13 +258,19 @@ async fn main() {
                 poll_db.insert_arb(&arb_opp);
                 let _ = poll_ws.send(models::WsEvent::ArbDetected { arb: arb_opp });
 
+                let leg1_sel = format!("{}@{:.3}", candidate.leg1_selection, candidate.leg1_odds);
+                let leg1_venue_str = format!("({})", candidate.leg1_venue);
+                let leg2_sel = format!("{}@{:.3}", candidate.leg2_selection, candidate.leg2_odds);
+                let leg2_venue_str = format!("({})", candidate.leg2_venue);
+                let game = candidate.event_id.rsplit(':').next().unwrap_or("");
                 tracing::info!(
-                    "[ARB] {:>5.2}% | {:<5} {:<10} | {}@{:.3} ({}) vs {}@{:.3} ({})",
+                    "[ARB]   {:>5.2}% | {:<5} {:<10} | {:>12} {:>12} vs {:<12} {:<12} | {}",
                     candidate.arb_pct * 100.0,
                     candidate.sport,
                     candidate.market_type,
-                    candidate.leg1_selection, candidate.leg1_odds, candidate.leg1_venue,
-                    candidate.leg2_selection, candidate.leg2_odds, candidate.leg2_venue,
+                    leg1_venue_str, leg1_sel,
+                    leg2_sel, leg2_venue_str,
+                    game,
                 );
 
                 // --- Safety checks before trading ---
@@ -295,6 +303,11 @@ async fn main() {
                         "[HIGH%] {:.1}% arb — possible mismatch: {} {}",
                         candidate.arb_pct * 100.0, candidate.event_id, candidate.market_type
                     );
+                }
+
+                // Skip live games if SKIP_LIVE is enabled
+                if skip_live && candidate.is_live {
+                    continue;
                 }
 
                 // Time-to-start filter: skip events too far in the future (capital lockup)

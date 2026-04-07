@@ -116,22 +116,24 @@ All 3 venues scan both live (in-play) and pre-game events:
 
 ---
 
-## 14-Layer Safety Filter Chain (in order)
+## Safety Filter Chain (in order)
 
 1. **3-way sport ML block** — Soccer moneylines have 3 outcomes (home/draw/away). 2-leg arb only covers 2, third loses both. Sports: SOCCER, EPL, LA_LIGA, SERIE_A, BUNDESLIGA, LIGUE_1, UCL, MLS.
-2. **Partial-period ML block** — Only full_game moneylines allowed. F3/F5/1st half MLs can tie.
-3. **Per-venue vig check** — Each venue's implied probability sum must be 0.95-1.25. Outside = misclassified market (3-way as 2-way, wrong period, doubleheader collision).
-4. **Spread line sign check** — Requires opposite signs (-1.5 vs +1.5). Same sign = both can lose.
-5. **Require Pinnacle leg** — `require_pinnacle_leg = true`. DK-FD arbs blocked (lost money on those).
-6. **Circuit breaker** — Pauses trading on cumulative loss or high rejection rate.
-7. **Rate limiter** — Per-venue sliding window bet limit.
-8. **Odds drift** — Rejects if odds moved >5% since detection.
-9. **>15% arb warning** — Logs `[HIGH%]` but doesn't block.
-10. **Time-to-start** — Skips events beyond `MAX_HOURS_TO_START` (default 6h) to prevent capital lockup.
+2. **Partial-period ML block** — Only full_game moneylines allowed. F3/F5/1st half MLs can tie. `detect_period` maps FD's "60 Min Moneyline (3 Way)" and Pinnacle period 6 to `regulation` so this filter blocks them.
+3. **Spread line sign check** — Requires opposite signs (-1.5 vs +1.5). Same sign = both can lose.
+4. **Require Pinnacle leg** — `require_pinnacle_leg = true`. DK-FD arbs blocked (lost money on those).
+5. **Circuit breaker** — Pauses trading on cumulative loss or high rejection rate.
+6. **Rate limiter** — Per-venue sliding window bet limit (200 bets/hour, 1-hour window).
+7. **Odds drift** — Rejects if odds moved >5% since detection.
+8. **>15% arb warning** — Logs `[HIGH%]` but doesn't block.
+9. **SKIP_LIVE filter** — When `SKIP_LIVE=1`, drops all live (in-play) games.
+10. **Time-to-start** — Skips pre-game events beyond `MAX_HOURS_TO_START` (default 24h) to prevent capital lockup. Live games skip this filter.
 11. **Balance-aware stake scaling** — Scales down stakes to fit venue balances instead of rejecting.
 12. **Quote sigma revalidation** — After Pinnacle quote returns current price, recalculates sigma. Aborts if >= 1.0.
 13. **Post-fill sigma revalidation** — After leg 1 fills at actual odds, recalculates sigma. Aborts leg 2 if >= 1.0 (one-sided exposure better than guaranteed loss).
 14. **60-second dedup cooldown** — Prevents re-trading same event/market/venue pair.
+
+**Removed**: Per-venue vig self-consistency check (was filter #3 in V4 merge). It blocked legitimate arbs with unusual vig and was redundant with the period filters that already catch the underlying mismatches.
 
 ---
 
@@ -162,15 +164,16 @@ Soft book FIRST, Pinnacle second. Pre-flight quote runs before any bets.
 | `STAKE_MODE` | `fixed` | `fixed` or `proportional` |
 | `PROPORTIONAL_PCT` | `5` | % of balance |
 | `ENABLED` | `true` | `false` = scan only |
-| `MAX_HOURS_TO_START` | `24` | Max hours before event start |
+| `MAX_HOURS_TO_START` | `24` | Max hours before pre-game event start |
 | `BALANCE_REFRESH_CYCLES` | `60` | Periodic balance sync interval (cycles) |
+| `SKIP_LIVE` | `0` | `1` = skip all live (in-play) games, only scan pre-game arbs |
 
 ### Hardcoded Values
 - `require_pinnacle_leg = true` — cannot be changed via env var
 - `POLL_INTERVAL_SECS = 5`
 - `MAX_DATA_AGE_MS = 30,000` (30s)
 - Odds drift threshold: 5%
-- Vig check range: 0.95-1.25
+- Rate limit: 200 bets/hour per venue (1-hour sliding window)
 - Fill timeout: 20s per leg
 - Token refresh: 5 min (Pinnacle)
 - Keepalive: 5 min (FD/DK browser reload)
@@ -211,6 +214,12 @@ Only entries where odds actually changed get written to the book. Unchanged entr
 13. **Doubleheader collision** — Same teams, same day, different times got same event ID. Fixed: `extract_date()` includes hour.
 14. **DK is_live hardcoded false** — DK odds_fetcher hardcoded `is_live = false` instead of reading `status` field from API. Live DK events have `status: "STARTED"`. Fixed: parse `is_live` from API. Also fixed arb_detector to use `ea.is_live || eb.is_live` instead of `key.is_live` (always false) for ArbCandidate, so live games correctly skip the time-to-start filter.
 15. **DK spread/total bet placement** — DK `placeBets` API requires `points` field in `selections` array for spread/total bets (e.g., `points: 1.5` for spread, `points: 226.5` for total). Without it, DK returns `NewOffer` status and silently refunds the bet. Fixed: `draftkings.js` now passes `points` from `calculateBets` response through to `placeBet`. Moneylines don't have `points` and are unaffected.
+16. **FD 3-way NHL moneylines polluting full_game** — FD API returns both a 2-way `Moneyline` (OT-included) and a 3-way `60 Min Moneyline (3 Way)` for NHL games. The 3-way market's home/away prices were entering the book under `period: "full_game"` and corrupting the order book. Fixed: `detect_period` now matches `"60 min"`, `"3 way"`, `"3-way"` and maps them to `"regulation"`, which the partial-period ML filter then blocks.
+17. **Vig check removal** — V4 added a per-venue vig self-consistency check (0.95-1.25 range) as a catch-all safety net. It blocked legitimate arbs with unusual odds and was redundant with the period-based filters. Removed entirely from `arb_detector.rs`.
+18. **Duplicate [HIGH%] warning** — V4 merge added a `[HIGH%]` warning in both `arb_detector.rs` and `main.rs`, causing every high-% arb to be logged twice. Removed the one in `arb_detector.rs`. The `main.rs` version runs after the `require_pinnacle_leg` filter so it only fires for actionable candidates.
+19. **`MAX_HOURS_TO_START` default 6h → 24h** — The 6-hour default was too restrictive and skipped most evening games when the engine was started in the morning. Bumped to 24 hours.
+20. **`SKIP_LIVE` env var added** — New optional toggle to skip all live (in-play) games and only scan pre-game arbs. Useful for avoiding stale-odds phantom arbs on live games. Default off (scans both).
+21. **Arb log output formatting** — Reformatted the `[ARB]` log line to align columns: `[ARB]   {pct} | {sport} {market_type} | (venue) {SEL@odds} vs {SEL@odds} (venue) | {GAME}`. Both venue parens have aligned outer edges, the `vs` is in a fixed column with exactly 1 space on each side, and the game name (extracted from event_id) is appended at the end.
 
 ---
 

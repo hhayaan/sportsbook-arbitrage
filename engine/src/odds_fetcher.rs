@@ -30,6 +30,8 @@ fn detect_period(label: &str) -> &'static str {
         "second_period"
     } else if lower.contains("3rd period") {
         "third_period"
+    } else if lower.contains("60 min") || lower.contains("3 way") || lower.contains("3-way") {
+        "regulation"
     } else {
         "full_game"
     }

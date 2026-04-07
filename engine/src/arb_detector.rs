@@ -39,45 +39,6 @@ pub fn detect_arbs(book: &Book, now_ms: u64, max_data_age_ms: u64, require_pinna
             continue;
         }
 
-        // Per-venue vig self-consistency check: a real 2-way market should have
-        // implied-probability sum (vig) of ~1.02-1.15. Outside 0.95-1.25 indicates
-        // misclassification (3-way as 2-way, wrong period, doubleheader collision, etc.).
-        let mut venue_vig_failed = false;
-        {
-            let mut by_venue: std::collections::HashMap<&str, Vec<&PriceEntry>> =
-                std::collections::HashMap::new();
-            for entry in entries.values() {
-                by_venue.entry(entry.venue.as_str()).or_default().push(entry);
-            }
-            for (venue, venue_entries) in &by_venue {
-                if venue_entries.len() < 2 { continue; }
-                let mut best_vig: Option<f64> = None;
-                for a in venue_entries {
-                    for b in venue_entries {
-                        if a.selection == b.selection { continue; }
-                        if !are_selections_complementary(&key.market_type, &a.selection, &b.selection) {
-                            continue;
-                        }
-                        let vig = 1.0 / a.decimal_odds + 1.0 / b.decimal_odds;
-                        if best_vig.is_none() || (vig - 1.0).abs() < (best_vig.unwrap() - 1.0).abs() {
-                            best_vig = Some(vig);
-                        }
-                    }
-                }
-                if let Some(vig) = best_vig {
-                    if !vig.is_finite() || vig < 0.95 || vig > 1.25 {
-                        tracing::warn!(
-                            "[VIG CHECK] {} vig={:.3} on {} {} period={} event={} — skipping",
-                            venue, vig, key.market_type, key.line_key, key.period, key.event_id
-                        );
-                        venue_vig_failed = true;
-                        break;
-                    }
-                }
-            }
-        }
-        if venue_vig_failed { continue; }
-
         for i in 0..selections.len() {
             for j in (i + 1)..selections.len() {
                 let sel_a = &selections[i];
@@ -153,16 +114,6 @@ pub fn detect_arbs(book: &Book, now_ms: u64, max_data_age_ms: u64, require_pinna
                         if sigma < 1.0 {
                             let arb_pct = 1.0 - sigma;
                             let roi = 1.0 / sigma - 1.0;
-
-                            // Warn on suspicious arbs but don't block
-                            if arb_pct > 0.15 {
-                                tracing::warn!(
-                                    "[HIGH%] {:.1}% arb — possible mismatch: {} {} {}@{:.3} ({}) vs {}@{:.3} ({})",
-                                    arb_pct * 100.0, key.event_id, key.market_type,
-                                    ea.selection, ea.decimal_odds, ea.venue,
-                                    eb.selection, eb.decimal_odds, eb.venue,
-                                );
-                            }
 
                             candidates.push(ArbCandidate {
                                 event_id: key.event_id.clone(),
