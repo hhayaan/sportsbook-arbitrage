@@ -1,152 +1,392 @@
-# Troubleshooting
+# Troubleshooting (V5 Current State)
 
-## DraftKings
+This document records current V5 operational issues plus historical fixes that should remain part of the project memory.
 
-### All DK fetches fail with "error sending request"
-**Cause**: Rust's reqwest can't complete TLS handshake with DK's CDN on Windows.
-**Fix**: Start the DK proxy: `node dk-proxy.js`. The engine routes DK requests through it automatically.
+## Current V5 Status Snapshot
 
-### DK proxy hangs / no response
-**Cause**: Previous version used Node's `https.get` which had the same TLS issue. Current version uses `fetch`.
-**Fix**: Ensure you're running the latest `dk-proxy.js`. Kill stale Node processes: `Get-Process -Name "node" | Stop-Process -Force`
+Known current state:
 
-### "Could not authenticate" / 401 on calculateBets
-**Cause**: DK session cookies expired.
-**Fix**: Refresh the DraftKings browser window or re-login.
+- Rust engine serves REST and dashboard WebSocket on `0.0.0.0:3401`.
+- DraftKings proxy listens on `localhost:3403`.
+- Bet placer listens on `localhost:3402`.
+- SQLite is opened at `data/trades.db` relative to the engine process working directory.
+- Live execution requires an engine startup connection to the bet placer.
+- Odds drift gate is currently 5% per leg in `main.rs`.
+- `engine/config.toml` is stale and not the authoritative runtime configuration.
+- `cargo check` is the useful compile-health command; `cargo test` currently has stale tests/fixtures.
 
-### "calculateBets failed (400)"
-**Cause**: Invalid selection ID or market no longer available.
-**Fix**: Engine will pick up fresh selection IDs on next scan cycle.
+## Startup Checklist
 
-### Bet confirmation timeout after 15s
-**Cause**: DK returned `waitingBetId` but bet never confirmed.
-**Fix**: Check your DK account — bet may still be pending. Don't retry blindly.
+Use this order for paper mode:
 
-### Spread/total bet placed but refunded (status: "NewOffer")
-**Cause**: DK `placeBets` API requires `points` field in `selections` array for spread/total markets. Without it, DK accepts the bet but returns `NewOffer` instead of `Open`, then refunds within 2 minutes.
-**Fix**: Fixed in `draftkings.js` — `points` from `calculateBets` response is now passed through to `placeBet`. DK minimum bet is ~$0.50; below this also gets refunded.
-
-## FanDuel
-
-### "placeBet failed (403): DSC-0015"
-**Cause**: PerimeterX blocking the request.
-**Fix**: This was fixed by using `context.request.post()` instead of `page.evaluate(fetch())`. If it recurs, refresh the FD browser window to get fresh PX cookies.
-
-### "no auth token" / authToken is null
-**Cause**: FD session expired (~13 min).
-**Fix**: Re-login in the FD browser window. Tokens re-read on every request.
-
-### "no geo token" / geoPacket is null
-**Cause**: GeoComply PLC not running.
-**Fix**: `taskkill /F /IM PlayerLocationCheck.exe` (auto-restarts), then refresh FD tab.
-
-### "implyBets failed: NOT_STARTED" or "SUSPENDED"
-**Cause**: Market not open for betting.
-**Fix**: Wait or engine will find a different pair.
-
-## Pinnacle
-
-### "Missing header parameter 'X-Session'"
-**Cause**: Adapter can't find session token in localStorage.
-**Fix**: Ensure you're logged into Pinnacle in the browser window. Session is stored in `localStorage["Main:User"].token`.
-
-### Quote returns different price than expected
-**Cause**: Odds moved between detection and quote. This is normal — Pinnacle updates odds frequently.
-**Fix**: Engine's odds drift check will reject if drift >3%.
-
-### Bet acceptance timeout after 20s
-**Cause**: Pinnacle's bet acceptance is asynchronous and can take up to 10s. If it exceeds 20s, something is wrong.
-**Fix**: Check your Pinnacle account. The bet may have been accepted after the timeout.
-
-### "quote failed (400)"
-**Cause**: Market closed, invalid matchupId, or marketKey format wrong.
-**Fix**: Engine will get fresh data on next scan cycle.
-
-## Engine
-
-### Arbs with "DRAW" selections (fake arbs)
-**Cause**: Soccer/MLS moneylines are 3-way (win/draw/lose). Pairing "Team A wins" with "Draw" is not a valid 2-way arb — if Team B wins, both bets lose. These appeared as 40-70% arbs which were obviously too good to be true.
-**Fix**: Two-layer fix:
-1. `team_names.rs` — `normalize_selection()` now catches "Draw", "The Draw", "Tie" and normalizes them to lowercase `"draw"` before they reach the team name normalizer (which would turn them into `"DRAW"` or `"DRA"`).
-2. `arb_detector.rs` — `are_selections_complementary()` excludes `"draw"` from moneyline pairing. Only team-vs-team pairs are valid 2-way arbs.
-
-### Phantom NHL/MLB/NBA arbs (5-30%) from period mismatches
-**Cause**: Sportsbooks return moneylines for multiple periods (full game, halves, quarters, individual innings, regulation-only). If the parser collapses different periods into one bucket, the partial-period odds get paired against full-game odds and create fake arbs.
-- **Pinnacle**: returns periods 0-9 (`s;0;m`, `s;1;m`, `s;6;m`, etc.). Period 6 = NHL regulation/3-way.
-- **FanDuel**: returns both `Moneyline` (2-way OT-included) and `60 Min Moneyline (3 Way)` for NHL.
-- **Pre-V4 bug**: only mapped Pinnacle periods 0-2, defaulted everything else to `full_game`. This corrupted the order book.
-**Fix**: `odds_fetcher.rs` now maps all Pinnacle periods (0-9) explicitly. `detect_period` matches `"60 min"`, `"3 way"`, `"3-way"` → `regulation`. The partial-period ML filter (`period != "full_game"`) then blocks them.
-
-### Vig check (removed)
-**Background**: V4 added a per-venue vig self-consistency check (rejected markets where 2-way implied probability sum was outside 0.95-1.25). It was a catch-all for misclassified markets but blocked legitimate arbs with unusual odds.
-**Resolution**: Removed entirely. The period-based filters catch the underlying mismatches more cleanly.
-
-### 34-38% NHL spread arbs (fake arbs)
-**Cause**: Spread markets have signed lines (+1.5 underdog, -1.5 favorite). The `MarketIdentityKey` grouped by signed `line_key`, so same-side bets from different venues ended up in separate groups. The arb detector saw different team names and paired them as if complementary — but they were the same side of the same spread.
-**Fix**: `models.rs` — `line_key` now uses `l.abs()` for spread markets, grouping both sides together. The complementarity check then correctly pairs favorite vs underdog.
-
-### Book drops from ~12,000 to ~700 entries after first scan
-**Cause**: Diff-based update only called `book.update()` for changed entries. Unchanged entries kept stale timestamps and expired after 30 seconds.
-**Fix**: Added `book.touch()` method that refreshes timestamps on unchanged entries without overwriting odds.
-
-### "BELOW_MIN_BET_AMOUNT" on Pinnacle
-**Cause**: Pinnacle has per-market minimum stakes (varies, ~$0.81 CAD typical).
-**Fix**: Pre-flight quote system. The engine now quotes Pinnacle before placing any bets, gets the exact `minRiskStake`/`maxRiskStake`, and adjusts both legs' stakes to fit within limits while maintaining the arb ratio. If the adjusted total exceeds `MAX_STAKE`, the arb is skipped.
-
-### Pinnacle alternate lines creating fake arbs
-**Cause**: Pinnacle returns alternate spread/total lines (`isAlternate: true`) at different odds than the main line. These were being paired against FD/DK main lines, creating impossible 34-38% "arbs."
-**Fix**: `odds_fetcher.rs` now filters out `isAlternate: true` Pinnacle markets. Only main lines are imported.
-
-### "failed to open sqlite db"
-**Cause**: `data/` directory doesn't exist relative to where the engine runs.
-**Fix**: `mkdir C:\dev\sportsbook-arbitrage\engine\data`
-
-### "WebSocket connection failed — falling back to paper"
-**Cause**: Bet placer not running when engine starts.
-**Fix**: Start the bet placer first, then the engine.
-
-### No arbs detected
-**Cause**: Normal — true arbs are rare between two soft books (DK/FD). Most arbs involve Pinnacle.
-**Fix**: Keep running. The engine scans every 5s. Pinnacle arbs are more frequent.
-
-### "[HEALTH] draftkings — no data"
-**Cause**: DK proxy not running, or DK API returning errors for that sport (offseason).
-**Fix**: Start DK proxy. Offseason sports returning empty data is expected.
-
-### "[ODDS DRIFT]" skipping trade
-**Cause**: Odds moved >3% between detection and execution attempt.
-**Fix**: Normal safety behavior — prevents placing bets on stale prices.
-
-### "[RATE LIMIT]" skipping trade
-**Cause**: Hit the per-venue bet limit.
-**Fix**: Wait for the sliding window to clear, or adjust rate limit settings in the engine code.
-
-## Browser / Patchright
-
-### "browser not launched"
-**Cause**: Browser window was closed manually or crashed.
-**Fix**: Restart the bet placer.
-
-### Browser profile corrupted
-**Fix**: Delete the profile and re-login:
 ```powershell
-Remove-Item -Recurse -Force C:\dev\sportsbook-arbitrage\data\profiles\draftkings
-Remove-Item -Recurse -Force C:\dev\sportsbook-arbitrage\data\profiles\fanduel
-Remove-Item -Recurse -Force C:\dev\sportsbook-arbitrage\data\profiles\pinnacle
+cd C:\dev\sportsbook-arbitrage
+node .\dk-proxy.js
 ```
-Then restart the bet placer and log in again.
 
-### Sessions expire during long runs
-**Cause**: Keepalive refreshes pages every 5 min, but sessions can still expire.
-**Fix**: Re-login in the browser windows. Verify with `balance` command.
+```powershell
+cd C:\dev\sportsbook-arbitrage\engine
+cargo run --bin arb-engine
+```
 
-## Common Patterns
+Use this order for live mode:
 
-### One-sided exposure (leg 1 placed, leg 2 failed)
-You have a live bet on one book with no hedge. Options:
-1. Manually place the other leg via `bet` command
-2. Cash out the placed bet (if available on that book)
-3. Accept the risk
+```powershell
+cd C:\dev\sportsbook-arbitrage
+node .\dk-proxy.js
+```
 
-### Engine exits with STATUS_CONTROL_C_EXIT
-**Not an error** — normal Windows behavior when you press Ctrl+C.
+```powershell
+cd C:\dev\sportsbook-arbitrage\bet-placer
+npm start
+```
+
+```powershell
+cd C:\dev\sportsbook-arbitrage\engine
+$env:LIVE_MODE = "1"
+cargo run --bin arb-engine
+```
+
+Confirm the engine log says the WebSocket connected to the bet placer before assuming live betting is active.
+
+## Engine Cannot Fetch DraftKings Odds
+
+Symptoms:
+
+- DraftKings market count is zero.
+- DK proxy terminal has no requests.
+- Rust logs mention DraftKings fetch failures.
+
+Checks:
+
+```powershell
+cd C:\dev\sportsbook-arbitrage
+node .\dk-proxy.js
+```
+
+Then open:
+
+```text
+http://localhost:3403/dk/42648
+```
+
+Expected behavior:
+
+- The proxy returns JSON for NBA when the public DK endpoint is healthy.
+- The proxy logs a `/dk/{leagueId}` request.
+
+Notes:
+
+- Rust tries `http://localhost:3403/dk/{leagueId}` first.
+- Rust then falls back to the direct DraftKings public URL.
+- The proxy exists because Node `fetch` has worked more reliably with DraftKings TLS/CDN behavior on Windows.
+
+## Engine Starts but Live Bets Do Not Place
+
+Likely causes:
+
+- `LIVE_MODE` was not set in the PowerShell session used to run Cargo.
+- Bet placer was not running before engine startup.
+- Engine failed initial WebSocket connection and fell back to paper execution.
+- Sportsbook browser sessions are logged out or geo/session tokens are stale.
+
+Checks:
+
+- In the bet placer terminal, confirm `[WS] Engine connected`.
+- In the engine terminal, confirm `WebSocket connected to bet placer`.
+- In the bet placer CLI, run `status` and `balance`.
+- Confirm DraftKings, FanDuel, and Pinnacle browser windows are logged in.
+
+Important current limitation: the engine does not reconnect to the bet placer after startup. Restart the engine after starting or restarting the bet placer.
+
+## Live Mode Falls Back to Paper
+
+Current behavior in `main.rs`:
+
+- If `LIVE_MODE=1`, the engine tries to connect to `WS_URL`.
+- If that connection fails, `ws_conn` is `None`.
+- Later execution branches to the paper executor when `ws_conn` is `None`.
+
+This is intentional current behavior but operationally dangerous if missed. Treat WebSocket connection logs as mandatory live-mode confirmation.
+
+## One-Sided Exposure After Leg 1
+
+Current live execution places one leg first and then the second leg. It reduces risk by:
+
+- placing the softer book first when Pinnacle is involved,
+- quoting Pinnacle before either leg is placed,
+- rechecking sigma after leg 1 fills.
+
+Remaining gap:
+
+- If leg 2 rejects or errors after leg 1 fills, the runtime logs exposure and returns.
+- `rescue_hedger.rs` can compute a rescue hedge, but it is not wired into `live_executor.rs`.
+
+Response:
+
+- Watch live logs during any real-money run.
+- Keep `FIXED_STAKE` and `MAX_STAKE` small while testing.
+- Be prepared to manually hedge on the opposite outcome.
+
+## Cargo Test Fails
+
+Current known issue:
+
+- `cargo check` passes.
+- `cargo test` contains stale unit tests/fixtures from older assumptions.
+
+Examples of stale assumptions:
+
+- Event ID tests still expect date-only IDs even though `extract_date` now includes hour when available.
+- Some odds verifier tests still pass `0.03` thresholds while runtime uses a 5% drift gate in `main.rs`.
+
+Until tests are refreshed, use:
+
+```powershell
+cd C:\dev\sportsbook-arbitrage\engine
+cargo check
+```
+
+Do not treat the current full test suite as an accurate V5 behavioral spec.
+
+## `engine/config.toml` Disagrees with Runtime
+
+Symptoms:
+
+- `config.toml` says `require_pinnacle_leg = false`, but runtime requires Pinnacle.
+- `config.toml` says max odds drift is 0.03, but runtime uses 0.05.
+- `config.toml` has venue limits/min stakes that do not match the main loop behavior.
+
+Current source of truth:
+
+- hardcoded runtime values in `main.rs` and `config.rs`,
+- SQLite `settings` table,
+- startup environment overrides.
+
+Treat `engine/config.toml` as historical/stale until it is either rewired or removed.
+
+## REST API Exposed on Local Network
+
+Current behavior:
+
+- Axum binds to `0.0.0.0:3401`.
+- CORS allows any origin.
+- There is no auth.
+
+Risk:
+
+- Anyone who can reach the port can call balance/settings/reset endpoints.
+
+Mitigation:
+
+- Run only on a trusted local machine/network.
+- Use Windows firewall rules if needed.
+- Do not port-forward this service.
+
+## Cookie Save Fails on Quit
+
+Symptom:
+
+- Bet placer exits with an error when saving cookies.
+
+Cause:
+
+- `BrowserManager.saveCookies` writes under root `data/cookies`, but does not currently create that directory.
+
+Fix:
+
+```powershell
+cd C:\dev\sportsbook-arbitrage
+New-Item -ItemType Directory -Force data\cookies | Out-Null
+```
+
+## FanDuel Balance Looks Wrong
+
+Current implementation:
+
+- Reads username from a localStorage/JWT path when possible.
+- Scrapes visible `span`, `div`, `p`, and `button` text.
+- Picks the largest visible dollar-looking value.
+
+This can misread promotional balances, unrelated page values, or stale UI. Verify FanDuel balances manually before live execution.
+
+## Pinnacle Quote Fails
+
+Symptoms:
+
+- Live candidate involving Pinnacle is skipped.
+- Logs show `quote failed`, `No selection in quote`, `x-session`, or 401/403 style errors.
+
+Checks:
+
+- Pinnacle browser is open and logged in.
+- `localStorage["Main:User"]` contains a device ID and session token.
+- The event/market still exists.
+- `venue_market_id` is in `{matchupId}:{marketKey}:{designation}` form.
+
+Current flow:
+
+- The bet placer uses direct Node `fetch`, not Patchright `context.request`, for Pinnacle betting.
+- Tokens refresh at most every 5 minutes unless missing.
+- A failed Pinnacle quote skips the arb before any leg is placed.
+
+## DraftKings Placement Fails
+
+Common causes:
+
+- Browser logged out.
+- Selection expired or market suspended.
+- `calculateBets` rejects the selection.
+- `placeBets` returns a non-200 response.
+- Confirmation stays `LiveDelay` until timeout.
+
+Current flow:
+
+1. `selectioninfo`
+2. `calculateBets`
+3. `placeBets`
+4. `getPurchases`
+
+DraftKings placement uses browser-page `fetch` with credentials included. If DK changes client headers or betslip payload shape, the adapter may need to be updated.
+
+## FanDuel Placement Fails
+
+Common causes:
+
+- Auth token missing from `session-sportsbook`.
+- Geo packet missing from `location_token`.
+- PX cookies missing or expired.
+- `implyBets` returns a non-success response.
+- Market selection ID no longer maps to a current runner.
+
+Current flow:
+
+1. `getMarketPrices`
+2. `implyBets`
+3. `placeBet`
+
+FanDuel placement uses Patchright `context.request` with generated headers and browser cookies.
+
+## Keepalive Reload Interference
+
+The bet placer reloads each sportsbook page every 5 minutes:
+
+```text
+KEEPALIVE_INTERVAL_MS = 5 * 60 * 1000
+```
+
+This keeps sessions warm, but a reload can interfere with manual inspection or a sensitive browser state. Be cautious around live placement windows.
+
+## Odds Drift Rejections
+
+Current runtime drift gate:
+
+```text
+verify_both_legs(..., 0.05)
+```
+
+This rejects candidates when either current book price differs from detection-time price by more than 5%. If many candidates are rejected for drift:
+
+- Check source freshness.
+- Check whether a venue is updating more slowly than others.
+- Check whether the event is live/in-play.
+- Consider raising `MIN_ARB_PCT` rather than loosening drift while testing.
+
+## High Arb Percent Warnings
+
+The current loop warns on very high `arb_pct`, but does not automatically reject solely for being high. Very large arbs are often caused by:
+
+- mismatched teams,
+- stale market data,
+- spread sign problems,
+- period mismatches,
+- three-way market misclassification,
+- source parsing drift.
+
+Review the normalized event ID, market type, period, line, selections, and venue market IDs before trusting unusually high opportunities.
+
+## Historical Fixes Preserved
+
+These are previous project issues that were fixed or partially fixed and should not be lost from project memory.
+
+### DraftKings Proxy Switched to Node Fetch
+
+Older proxy code used lower-level HTTPS handling that was less reliable on Windows. `dk-proxy.js` now uses Node `fetch`, which has been more reliable against DraftKings' CDN/TLS behavior.
+
+### Draw Arbs Blocked
+
+The detector now blocks two-leg moneyline arbs for soccer-style three-way sports and rejects `draw` selections in moneyline complements. This fixed false arbs where home/away both looked profitable but draw was a third live outcome.
+
+### Partial-Period Moneylines Blocked
+
+Partial-period moneylines are skipped because ties/pushes are common and two-leg home/away treatment is unsafe.
+
+### Regulation Period Detection Added
+
+DK/FD labels containing `60 min`, `3 way`, or `3-way` are mapped to `regulation`. Pinnacle period `6` is also mapped to `regulation`. This reduces false mismatches between 60-minute/three-way markets and full-game markets.
+
+### Spread Sign Validation Added
+
+Spread market identity groups by absolute line value, but detection now requires opposite line signs. This prevents both-favorite or both-underdog spread pairs from being treated as complementary.
+
+### Alternate Pinnacle Lines Filtered
+
+Pinnacle alternate-market handling was tightened so alternate lines do not pollute primary market comparisons.
+
+### Team Name Normalization Expanded
+
+`team_names.rs` contains broad normalization for pro, college, soccer, and fighter names, plus fallbacks. Canonical IDs sort team codes to match the same game across venues with different home/away string conventions.
+
+### Adapter-Ready Venue Market IDs Added
+
+The normalized market model carries venue-specific IDs needed by live placement:
+
+- DraftKings selection IDs
+- FanDuel `{marketId}:{selectionId}`
+- Pinnacle `{matchupId}:{marketKey}:{designation}`
+
+### Pinnacle Quote Preflight Added
+
+Live execution now quotes Pinnacle before any leg is placed, validates quoted sigma, and adjusts stakes for Pinnacle min/max limits.
+
+### Balance Sync Added
+
+Live startup fetches real balances through the bet placer and writes them into SQLite. Live fills can also send best-effort `balance_update` messages back to Rust.
+
+### Paper Trading Kept Separate from Live Placement
+
+Paper execution remains a local simulation in SQLite. Live placement is isolated behind the bet placer WebSocket.
+
+## Quick Reference
+
+Ports:
+
+```text
+3401 Rust REST/dashboard WebSocket
+3402 Node bet placer WebSocket
+3403 DraftKings public odds proxy
+```
+
+Key URLs:
+
+```text
+http://localhost:3401/api/balances
+http://localhost:3401/api/trades
+http://localhost:3401/api/arbs
+http://localhost:3401/api/settings
+ws://localhost:3401/ws
+ws://localhost:3402
+http://localhost:3403/dk/42648
+```
+
+Low-stake live test environment:
+
+```powershell
+cd C:\dev\sportsbook-arbitrage\engine
+$env:LIVE_MODE = "1"
+$env:FIXED_STAKE = "1"
+$env:MAX_STAKE = "1"
+$env:MIN_ARB_PCT = "0.5"
+$env:SKIP_LIVE = "1"
+cargo run --bin arb-engine
+```

@@ -1,111 +1,273 @@
-# Execution Flow
+# Execution Flow (V5 Current State)
 
-## Scan -> Detect -> Execute Pipeline
+This document traces what happens from public odds polling through paper or live execution. It reflects the current Rust and Node implementation, not the older `config.toml` policy draft.
 
-```
-1. SCAN — Fetch odds from DK/FD/PIN concurrently (every 5s)
-       │
-2. BOOK UPDATE — Diff-based: only update entries where odds changed
-       │
-3. EXPIRE — Remove entries older than 30s
-       │
-4. DETECT — For each market identity key:
-       │     Group prices by selection
-       │     For each cross-venue pair: sigma = 1/odds_a + 1/odds_b
-       │     If sigma < 1.0: arb candidate found
-       │     Draw selections excluded (3-way soccer moneylines are not valid 2-way arbs)
-       │
-5. SAFETY CHECKS (per candidate):
-       │  ├── Circuit breaker: cumulative loss or rejection rate
-       │  ├── Rate limiter: per-venue bets/hour
-       │  ├── Odds drift: recheck book, reject if >3% drift
-       │  └── Bettable venues: skip if either leg is non-bettable
-       │
-6. STAKE SIZING — Proportional split to equalize payouts:
-       │     leg1_stake = capital * (1/leg1_odds) / sigma
-       │     leg2_stake = capital * (1/leg2_odds) / sigma
-       │
-7. EXECUTE — Send PlaceBetCommand via WebSocket
-       ├── LEG 1 (soft book first, FD when applicable)
-       │     └── If fails: stop, no leg 2 placed
-       └── LEG 2
-             └── If fails after leg 1: WARNING one-sided exposure
+## High-Level Loop
+
+The main loop runs inside `engine/src/main.rs`.
+
+```text
+startup
+  open SQLite at data/trades.db
+  seed balances/settings if missing
+  apply env setting overrides
+  start dashboard broadcaster
+  build reqwest client
+  if LIVE_MODE=1, try WebSocket connection to bet placer
+  start polling task
+  start Axum REST/WebSocket server on 0.0.0.0:3401
+
+poll cycle, every 5 seconds
+  fetch all configured venue odds concurrently
+  update in-memory Book
+  detect arb candidates
+  persist arb opportunities
+  broadcast dashboard events
+  run execution gates
+  execute eligible candidates in paper or live mode
+  periodically refresh live balances
 ```
 
-## Sigma Formula
+If `LIVE_MODE=1` but the engine cannot connect to `WS_URL` during startup, it logs a warning and continues without a live WebSocket connection. In that state, execution uses the paper executor.
 
+## Odds Collection
+
+`odds_fetcher::fetch_all` fetches odds for the sports configured in `engine/src/config.rs`.
+
+Current source behavior:
+
+- DraftKings: Rust fetches through `http://localhost:3403/dk/{leagueId}` first. The proxy calls DraftKings with Node `fetch`. Rust falls back to the direct DraftKings URL if needed.
+- FanDuel: Rust calls Ontario FanDuel content-managed-page endpoints for public odds.
+- Pinnacle: Rust calls guest Arcadia endpoints for public odds.
+
+All responses are converted into `CanonicalMarket` records with normalized event IDs, selections, period labels, line values, venue IDs, and timestamps.
+
+## Normalization
+
+Team and selection matching is handled by `engine/src/team_names.rs`.
+
+Canonical event IDs:
+
+```text
+{SPORT}:{YYYY-MM-DDTHH}:{TEAM_A}-vs-{TEAM_B}
 ```
-sigma = 1/decimal_odds_a + 1/decimal_odds_b
+
+`TEAM_A` and `TEAM_B` are sorted alphabetically after normalization. The suffix is therefore a stable pair key, not guaranteed away-vs-home order.
+
+Examples:
+
+```text
+NBA:2026-03-15T19:BOS-vs-GSW
+NHL:2026-03-15T20:BOS-vs-NYR
 ```
 
-| Sigma | Meaning |
-|-------|---------|
-| 0.95 | 5% guaranteed profit (strong arb) |
-| 0.99 | 1% guaranteed profit (thin arb) |
-| 1.00 | Break-even |
-| 1.03 | 3% house edge (not an arb) |
+If the source start time cannot be parsed into a date/hour, the code falls back to an alphanumeric hash derived from the source start time.
 
-## Stake Optimization
+Period normalization:
 
-Goal: split total capital so the payout is identical regardless of which side wins.
+- DK/FD labels containing first/second half, quarters, periods, `60 min`, `3 way`, or `3-way` map to explicit period strings.
+- Pinnacle period numbers map in code, with period `6` currently treated as `regulation`.
+- Unmatched labels default to `full_game`.
 
+Spread identity uses absolute line values for matching, then detector logic verifies opposite signs before accepting the candidate.
+
+## Arb Detection
+
+`arb_detector::detect_arbs` groups in-memory prices by market identity and searches two complementary selections.
+
+Detection rules:
+
+- Candidate data must be fresh according to `MAX_DATA_AGE_MS` from `config.rs` (currently 30000 ms).
+- Candidate must have at least two selections.
+- Soccer-style three-way moneyline sports are skipped for two-leg moneyline arbs.
+- Partial-period moneylines are skipped.
+- Moneyline complements must be different non-draw selections.
+- Totals and team totals require `over` vs `under`.
+- Spreads and alternate spreads require different selections and opposite line signs.
+- Current runtime requires at least one Pinnacle leg.
+
+Math:
+
+```text
+sigma = 1 / leg1_odds + 1 / leg2_odds
+arb_pct = 1 - sigma
+roi = 1 / sigma - 1
 ```
+
+Only candidates with `sigma < 1.0` are arbs. Candidates are sorted by `arb_pct` descending.
+
+## Pre-Execution Gates
+
+The main loop applies these gates before calling the executor:
+
+1. Persist and broadcast the detected opportunity.
+2. Check the in-memory circuit breaker.
+3. Check the per-venue rate limiter.
+4. Verify both candidate legs are still present in the current book.
+5. Reject if either leg has drifted more than 5% from detection-time odds.
+6. Warn but do not automatically reject very high `arb_pct` values.
+7. Skip if `SKIP_LIVE=1` and the candidate is live.
+8. Skip pregame events more than `MAX_HOURS_TO_START` hours away. The default is 24.
+9. Skip if the candidate's dedup key has already traded.
+10. Require `settings.enabled`.
+11. Call the paper or live executor, which enforces `settings.min_arb_pct` and stake sizing constraints.
+
+The dedup key is:
+
+```text
+event_id | market_type | period | line | leg1_selection | leg2_selection
+```
+
+Because the detector's `selections` vector comes from a hash map, leg selection order can be implementation-dependent. The current dedup key works in practice for the observed flow, but it is not a fully canonical sorted pair key.
+
+## Stake Sizing
+
+`stake_optimizer.rs` sizes the two legs to equalize payout.
+
+Given total capital:
+
+```text
 leg1_stake = capital * (1 / leg1_odds) / sigma
 leg2_stake = capital * (1 / leg2_odds) / sigma
 guaranteed_payout = capital / sigma
 guaranteed_profit = guaranteed_payout - capital
 ```
 
-Example with sigma=0.97, capital=$2.00:
-- Leg 1: Team A @2.10 -> stake $0.98
-- Leg 2: Team B @1.95 -> stake $1.06
-- Guaranteed payout: $2.06 (profit: $0.06)
+Stakes and results are rounded to cents.
 
-## Execution Ordering
+`compute_stakes_with_balances` scales capital down when a leg would exceed:
 
-Soft book FIRST, Pinnacle second. Pre-flight quote still runs before any bets.
+- the venue balance stored in SQLite, or
+- `settings.max_stake` per leg.
 
-1. **Pre-flight quote** — if either leg is Pinnacle, quote it first to get min/max stakes and current price. Adjust stakes if needed.
-2. **Quote sigma revalidation** — recalculate sigma with quoted price. If >= 1.0, abort (arb closed). No bets placed.
-3. **Place leg 1 (soft book)** — FD or DK goes first. If rejected = zero exposure.
-4. **Post-fill sigma revalidation** — recalculate sigma with actual fill odds. If >= 1.0, abort leg 2 (one-sided exposure better than guaranteed loss).
-5. **Place leg 2 (Pinnacle)** — Pinnacle almost never rejects.
+It skips plans below:
 
-When both legs are soft books (FD+DK): blocked by `require_pinnacle_leg=true`. DK-FD arbs lost money.
+- `MIN_CAPITAL = 1.0`
+- `MIN_PROFIT = 0.01`
 
-## Balance Management
+Settings defaults are seeded in SQLite:
 
-1. On engine startup (live mode): engine requests real balances from the bet placer
-2. After each bet fill: the bet placer sends `balance_update` with the real sportsbook balance
-3. Every 60 cycles (~5 min): periodic balance refresh picks up winnings from settled bets
-4. Balance-aware stake scaling: if venue balance is too low, stakes scale down instead of rejecting
+| Setting | Default |
+| --- | ---: |
+| `enabled` | `true` |
+| `min_arb_pct` | `0.5` |
+| `max_stake` | `50` |
+| `stake_mode` | `fixed` |
+| `fixed_stake` | `25` |
+| `proportional_pct` | `5` |
 
-## Deduplication
+`stake_mode=fixed` requests `fixed_stake * 2` total capital. `stake_mode=proportional` requests a percentage of the smaller venue balance, capped by `max_stake * 2`.
 
-After executing a trade, the match key is placed on a 60-second cooldown. Any arb candidate with the same event + market type + venue pair is skipped during this window to prevent duplicate bets.
+## Paper Execution
 
-## Engine Configuration
+`paper_executor::try_execute`:
 
-All settable via environment variables at launch:
+1. Checks `settings.min_arb_pct`.
+2. Reads both venue balances from SQLite.
+3. Computes a balance-aware stake plan.
+4. Deducts both stakes.
+5. Immediately credits back stake plus theoretical profit share.
+6. Inserts a `paper_trades` row with status `executed`.
 
-| Env Var | Default | Description |
-|---------|---------|-------------|
-| `LIVE_MODE` | `0` | `1` = real bets, `0` = paper trading |
-| `FIXED_STAKE` | `25` | $ per leg (fixed mode) |
-| `MAX_STAKE` | `50` | Hard cap per leg |
-| `MIN_ARB_PCT` | `0.5` | Minimum profit % to trigger |
-| `STAKE_MODE` | `fixed` | `fixed` or `proportional` |
-| `PROPORTIONAL_PCT` | `5` | % of balance per trade |
-| `ENABLED` | `true` | `false` = scan only |
-| `MAX_HOURS_TO_START` | `24` | Max hours before pre-game event start (capital lockup prevention) |
-| `BALANCE_REFRESH_CYCLES` | `60` | Periodic balance sync interval (~5 min at 5s polling) |
-| `SKIP_LIVE` | `0` | `1` = skip all live (in-play) games, only scan pre-game |
-| `WS_URL` | `ws://127.0.0.1:3402` | Bet placer address |
+Paper execution is a simulator. It does not model sportsbook rejection, settlement delay, voids, pushes, odds movement during placement, or one-sided exposure.
 
-## Sports Covered
+## Live Execution
 
-NBA, NHL, MLB, NFL, NCAAB, NCAAF, EPL, La Liga, Serie A, Bundesliga, Ligue 1, UCL, MLS, UFC
+`live_executor::try_execute` is used only when the engine has an active WebSocket connection to the Node bet placer.
 
-## Team Name Normalization
+Supported live venues:
 
-200+ team names across all sports are normalized to canonical codes (e.g., "Golden State Warriors", "GS Warriors", "Warriors" all -> `GSW`). Match keys use format: `{SPORT}:{DATE}:{AWAY}-vs-{HOME}` to join the same game across venues.
+```text
+draftkings
+fanduel
+pinnacle
+```
+
+Live execution steps:
+
+1. Check `settings.min_arb_pct`.
+2. Read current venue balances from SQLite.
+3. Compute a balance-aware stake plan.
+4. Choose leg order:
+   - If one leg is Pinnacle, place the non-Pinnacle leg first.
+   - For FanDuel vs DraftKings, place FanDuel first.
+5. If Pinnacle is involved, send `quote_bet` before either leg is placed.
+6. Validate quoted Pinnacle price with quote sigma.
+7. Adjust stake to Pinnacle min/max limits if needed and recalculate the other leg.
+8. Place leg 1 with `place_bet`.
+9. Drain best-effort `balance_update` messages.
+10. Recompute sigma from accepted leg 1 odds and expected leg 2 odds.
+11. Abort leg 2 if post-fill sigma is no longer an arb.
+12. Place leg 2 with `place_bet`.
+13. Drain best-effort balance updates.
+14. Insert a trade with status `executed_live`.
+
+If leg 1 rejects, leg 2 is not placed. If leg 2 rejects after leg 1 fills, the current runtime logs one-sided exposure and returns without inserting a completed live trade. Automatic rescue hedging is not currently wired into live execution.
+
+## Engine-to-Bet-Placer WebSocket
+
+Default endpoint:
+
+```text
+ws://127.0.0.1:3402
+```
+
+Request types from Rust:
+
+- `get_balances`
+- `quote_bet`
+- `place_bet`
+- `ping`
+
+Response types from Node:
+
+- `balances`
+- `quote_result`
+- `fill_report`
+- `balance_update`
+- `pong`
+
+The Rust reader waits for messages matching the expected type and `attempt_id` where applicable. There is no reconnect loop after the initial connection.
+
+## Balance Flow
+
+Startup in live mode:
+
+1. Rust connects to the bet placer.
+2. Rust sends `get_balances`.
+3. Node asks each sportsbook adapter for balance.
+4. Rust writes balances into SQLite.
+5. Rust broadcasts `balance_updated` to dashboard clients.
+
+After live fills:
+
+- The Node adapter sends a best-effort `balance_update` for that venue.
+- Rust drains pending `balance_update` messages after each leg and updates SQLite.
+
+Periodic refresh:
+
+- `BALANCE_REFRESH_CYCLES` controls how often the polling loop asks the bet placer for fresh balances.
+- Default is every 60 poll cycles, which is roughly every 5 minutes at the current 5 second poll interval.
+
+## Dashboard Broadcasts
+
+The engine broadcasts these WebSocket events to dashboard clients connected to `/ws`:
+
+- `arb_detected`
+- `trade_executed`
+- `balance_updated`
+- `settings_updated`
+- `poll_status`
+- `error`
+
+These dashboard events are separate from the engine-to-bet-placer WebSocket protocol.
+
+## Current Operational Caveats
+
+- `engine/config.toml` is not the active policy source for the main loop.
+- REST and dashboard WebSocket bind to `0.0.0.0:3401` and have no auth.
+- `cargo test` currently includes stale tests from older event ID and drift-threshold assumptions.
+- The richer state machine, treasury model, policy helper, and rescue hedger are present but not wired into the main execution path.
+- A live WebSocket startup failure causes paper fallback.
+- There is no automatic live WebSocket reconnect.
+- Bet placer keepalive reloads sportsbook pages every 5 minutes, which can interfere with browser state during an active operation.

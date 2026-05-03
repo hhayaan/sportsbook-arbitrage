@@ -1,509 +1,301 @@
-# Arb Engine V3
+# Arb Engine V5
 
-A production-grade sports arbitrage detection and execution engine written in Rust. Designed as a standalone, modular core that plugs into separate ingestion, executor, and dashboard services via Redis.
+Rust scanning, arbitrage detection, safety filtering, stake sizing, persistence, and API layer for the local sportsbook arbitrage bot.
 
-## Architecture
+V5 is a local multi-process system:
 
+```text
+Rust Engine (port 3401)
+  - polls public odds APIs every 5 seconds
+  - normalizes markets into one canonical shape
+  - maintains an in-memory order book
+  - detects cross-venue arbitrage
+  - applies safety filters and stake sizing
+  - persists balances, trades, settings, and arb logs to SQLite
+  - exposes REST and WebSocket APIs
+
+Bet Placer (Node.js, port 3402)
+  - launches Patchright Chrome profiles for DraftKings, FanDuel, Pinnacle
+  - keeps authenticated browser sessions alive
+  - receives quote/place/balance commands over WebSocket
+  - places live bets through sportsbook adapters
+
+DK Proxy (Node.js, port 3403)
+  - forwards DraftKings public odds API requests
+  - works around Rust reqwest TLS issues with DraftKings on Windows
 ```
-[Ingestion Service]          [Executor Service]          [Dashboard]
-  (TypeScript)                 (Playwright)               (Next.js)
-       |                            ^                        ^
-       v                            |                        |
-  Redis Streams              Redis Pub/Sub              PostgreSQL
-  markets:{venue}            commands:{venue}           (read-only)
-       |                            |                        |
-       +----------> [ ARB ENGINE V3 ] <---------------------+
-                     (This project)
-                          |
-                          v
-                      PostgreSQL
-                    (audit trail)
+
+## Project Goal
+
+The bot scans DraftKings, FanDuel, and Pinnacle odds across supported sports, identifies two-outcome arbitrage where:
+
+```text
+sigma = 1 / leg1_decimal_odds + 1 / leg2_decimal_odds
 ```
 
-The engine is the **brain** of the system. It:
+and treats `sigma < 1.0` as a candidate guaranteed-profit opportunity.
 
-1. Consumes normalized market data from Redis Streams
-2. Detects arbitrage opportunities across sportsbooks
-3. Computes optimal stake allocation
-4. Executes trades (paper or live) through a modular executor interface
-5. Manages risk through multiple safety layers
-6. Persists all trade attempts and diagnostics to PostgreSQL
+The engine is designed to:
 
-## Quick Start
+1. Fetch and normalize odds from public sportsbook endpoints.
+2. Keep a fresh in-memory book with 30-second expiry.
+3. Detect valid cross-venue arbitrage candidates.
+4. Block known fake arbs from market mismatches.
+5. Size stakes against configured stake limits and current venue balances.
+6. Execute trades in paper mode or live mode through the Node bet placer.
+7. Persist operational history in SQLite.
+8. Expose REST and WebSocket APIs for status, settings, balances, and trade history.
+
+## Current Architecture
+
+```text
+                    +------------------------------+
+                    | Rust Engine                  |
+                    | engine/src/main.rs           |
+                    |                              |
+                    | HTTP API: 0.0.0.0:3401       |
+                    | WS events: /ws               |
+                    | SQLite: engine/data/trades.db|
+                    +---------------+--------------+
+                                    |
+                                    | WebSocket commands
+                                    v
+                    +------------------------------+
+                    | Node Bet Placer              |
+                    | bet-placer/index.js          |
+                    | WS server: localhost:3402    |
+                    | Patchright Chrome profiles   |
+                    +------------------------------+
+
+                    +------------------------------+
+                    | DK Proxy                     |
+                    | dk-proxy.js                  |
+                    | HTTP: localhost:3403         |
+                    +------------------------------+
+```
+
+## Main Engine Modules
+
+| Module | Purpose |
+| --- | --- |
+| `main.rs` | Entry point, settings/env handling, polling loop, safety orchestration, REST server |
+| `config.rs` | Supported sports, league IDs, API hostnames, polling constants |
+| `odds_fetcher.rs` | DraftKings, FanDuel, and Pinnacle odds fetchers and parsers |
+| `team_names.rs` | Team, selection, event ID, and player name normalization |
+| `models.rs` | Canonical market model, order book, arb/trade/settings/API event models |
+| `arb_detector.rs` | Sigma detection, complementarity checks, Pinnacle requirement, market mismatch filters |
+| `stake_optimizer.rs` | Balance-aware stake sizing and scaling |
+| `paper_executor.rs` | Simulated execution and balance updates |
+| `live_executor.rs` | WebSocket connection to bet placer, quote flow, live two-leg execution |
+| `odds_verifier.rs` | Pre-execution odds drift checks |
+| `circuit_breaker.rs` | Rolling loss and rejection breaker |
+| `rate_limiter.rs` | Per-venue one-hour sliding bet window |
+| `db.rs` | SQLite schema and CRUD |
+| `api.rs` | REST handlers and `/ws` upgrade |
+| `ws.rs` | Broadcast channel for realtime client events |
+
+The following modules exist but are not wired into the current live execution path: `rescue_hedger.rs`, `treasury.rs`, `state_machine.rs`, `policy.rs`, and `trades.rs`.
+
+## Running V5
 
 ### Prerequisites
 
-- Rust 1.70+
-- Redis 7
-- PostgreSQL 16
-- Docker (for infrastructure)
+- Windows with the MSVC Rust toolchain.
+- Node.js.
+- Chrome installed for Patchright.
+- GeoComply PLC running for FanDuel.
+- Logged-in DraftKings, FanDuel, and Pinnacle browser sessions for live mode.
+- Ontario/CA sportsbook accounts and endpoints.
 
-### Run Infrastructure
+### Build
 
-```bash
-# Start Redis + PostgreSQL
-docker run -d --name redis -p 6379:6379 redis:7-alpine
-docker run -d --name postgres -p 5432:5432 \
-  -e POSTGRES_USER=arb \
-  -e POSTGRES_PASSWORD=arb_dev_password \
-  -e POSTGRES_DB=arb_engine_v3 \
-  postgres:16-alpine
+```powershell
+cd C:\dev\sportsbook-arbitrage\engine
+cargo build
 ```
 
-### Build and Run
+### Paper Mode
 
-```bash
-cd engine
-cargo build --release
-cargo run --release
+Paper mode scans odds and simulates trades. The DK proxy should still be running so DraftKings odds can be fetched reliably on Windows.
+
+```powershell
+# Terminal 1
+cd C:\dev\sportsbook-arbitrage
+node dk-proxy.js
+
+# Terminal 2
+cd C:\dev\sportsbook-arbitrage\engine
+cargo run
 ```
 
-### Run Tests
+### Live Mode
 
-```bash
-cargo test
+Start the bet placer before the engine. The engine attempts its WebSocket connection only at startup.
+
+```powershell
+# Terminal 1
+cd C:\dev\sportsbook-arbitrage
+node dk-proxy.js
+
+# Terminal 2
+cd C:\dev\sportsbook-arbitrage\bet-placer
+node index.js
 ```
 
-58 unit tests across all critical modules.
+Log in to DraftKings, FanDuel, and Pinnacle in the opened Chrome windows. In the bet placer terminal, run:
 
-### Environment Variables
+```text
+balance
+```
+
+Then start the engine:
+
+```powershell
+# Terminal 3
+cd C:\dev\sportsbook-arbitrage\engine
+$env:LIVE_MODE="1"
+$env:FIXED_STAKE="1"
+$env:MAX_STAKE="2"
+$env:MIN_ARB_PCT="0.5"
+cargo run
+```
+
+## Runtime Settings
+
+Most active settings come from SQLite and environment variables at startup. `engine/config.toml` is mostly legacy and is not the main runtime configuration source.
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `REDIS_URL` | `redis://127.0.0.1:6379` | Redis connection URL |
-| `DATABASE_URL` | `postgres://arb:arb_dev_password@localhost:5432/arb_engine_v3` | PostgreSQL connection URL |
-| `LOG_DIR` | `logs` | Directory for log files |
+| --- | --- | --- |
+| `LIVE_MODE` | `0` | `1` uses real bet placement through the bet placer; otherwise paper mode |
+| `FIXED_STAKE` | `25` | Per-leg stake in fixed mode |
+| `MAX_STAKE` | `50` | Max stake per leg |
+| `MIN_ARB_PCT` | `0.5` | Minimum arb percent required for execution |
+| `STAKE_MODE` | `fixed` | `fixed` or `proportional` |
+| `PROPORTIONAL_PCT` | `5` | Percent of smaller venue balance used in proportional mode |
+| `ENABLED` | `true` | `false` scans/logs but does not execute |
+| `MAX_HOURS_TO_START` | `24` | Skip pre-game events farther out than this |
+| `BALANCE_REFRESH_CYCLES` | `60` | Periodic live balance refresh interval in poll cycles |
+| `SKIP_LIVE` | `0` | `1` skips all live/in-play candidates |
+| `WS_URL` | `ws://127.0.0.1:3402` | Bet placer WebSocket URL |
 
-## Configuration
+Hardcoded runtime values to know:
 
-All runtime behavior is controlled via `config.toml`. The engine loads this file on startup and falls back to safe defaults if missing.
+- `require_pinnacle_leg = true` in `main.rs`.
+- Poll interval is 5 seconds.
+- Book freshness limit is 30 seconds.
+- Pre-execution odds drift threshold is 5%.
+- Rate limit is currently 200 bets/hour per venue.
+- REST API binds to `0.0.0.0:3401`.
 
-### Strategy
+## Detection Pipeline
 
-```toml
-[strategy]
-require_pinnacle_leg = true   # Only trade arbs with Pinnacle on one side
+```text
+fetch odds
+  -> normalize to CanonicalMarket
+  -> diff/touch in-memory Book
+  -> expire stale entries
+  -> group by MarketIdentityKey
+  -> find complementary selections
+  -> compute sigma
+  -> emit ArbCandidate when sigma < 1.0
+  -> persist ArbOpportunity
+  -> safety checks
+  -> paper or live execution
 ```
 
-**Why Pinnacle?** Pinnacle is the sharpest sportsbook globally. When DraftKings or FanDuel disagree with Pinnacle's line, the soft book is genuinely mispriced. DK-vs-FD arbs without Pinnacle are more likely to be stale data artifacts or will get rejected/limited. When enabled, skipped DK-FD arbs are logged with sigma/arb% for opportunity cost tracking.
+Important market matching behavior:
 
-### Policy Gates
+- `MarketIdentityKey.is_live` is always forced to `false` so venues can pair when they disagree on live status.
+- The actual live flag still flows through `PriceEntry` and `ArbCandidate`.
+- Spread line keys use absolute value so `+1.5` and `-1.5` group together before sign validation.
+- Soccer and other 3-way moneylines are blocked.
+- Partial-period moneylines are blocked unless `period == "full_game"`.
+- Pinnacle alternate markets are filtered out.
+- FanDuel "60 Min Moneyline (3 Way)" and similar labels map to `regulation`.
 
-```toml
-[policy]
-min_identity_confidence = 0.95     # Market matching confidence threshold
-max_data_age_ms = 60000            # Max quote age (60 seconds)
-min_seconds_to_start = 60          # Pre-game buffer (skipped for live)
-min_stake = 5.0                    # Minimum per-leg stake ($)
-min_profit = 0.50                  # Minimum guaranteed profit ($)
-max_rescue_loss = 25.0             # Max acceptable rescue hedge loss ($)
-max_event_exposure = 500.0         # Max total $ deployed on one event
-max_stake_pct = 0.20               # Max single leg as % of venue balance
-dedup_cooldown_secs = 60           # Pre-game dedup cooldown
-live_dedup_cooldown_secs = 15      # Live/in-play dedup cooldown
-max_odds_drift = 0.03              # Max acceptable odds drift (3%)
-source_health_threshold_ms = 30000 # Venue considered unhealthy after 30s silence
+## Execution Flow
+
+Live execution in `live_executor.rs` is sequential:
+
+1. Size the trade with current DB balances.
+2. If Pinnacle is involved, quote Pinnacle first.
+3. Recalculate sigma with quoted Pinnacle price.
+4. Adjust stakes for Pinnacle min/max stake if needed.
+5. Place the soft-book leg first.
+6. Recalculate sigma after leg 1 fills.
+7. Place Pinnacle second.
+8. Persist a trade record and update balances.
+
+If leg 1 fails, leg 2 is not placed. If leg 2 fails after leg 1 fills, the engine logs one-sided exposure. Rescue hedge computation exists but is not currently wired into live execution.
+
+## REST API
+
+The engine serves these routes on port `3401`:
+
+| Route | Method | Purpose |
+| --- | --- | --- |
+| `/api/balances` | GET | Current balances |
+| `/api/balances/deposit` | POST | Add funds to a venue balance |
+| `/api/balances/withdraw` | POST | Remove funds from a venue balance |
+| `/api/balances/reset` | POST | Reset balances to initial values |
+| `/api/trades` | GET | Last 200 trades |
+| `/api/arbs` | GET | Last 200 detected arbs |
+| `/api/stats` | GET | Aggregate stats |
+| `/api/settings` | GET | Current execution settings |
+| `/api/settings` | POST | Replace execution settings |
+| `/api/reset` | POST | Clear trades/arbs and reset balances |
+| `/ws` | WS | Realtime event stream |
+
+Example:
+
+```powershell
+Invoke-RestMethod http://localhost:3401/api/settings
+Invoke-RestMethod http://localhost:3401/api/balances
+Invoke-RestMethod http://localhost:3401/api/trades
+Invoke-RestMethod http://localhost:3401/api/stats
 ```
 
-### Circuit Breaker
+## Database
 
-```toml
-[circuit_breaker]
-loss_threshold = 50.0       # Trip if cumulative loss > $50 in window
-loss_window_secs = 1800     # 30-minute rolling window
-rejection_threshold = 0.50  # Trip if >50% of recent attempts rejected
-rejection_window = 10       # Look at last 10 attempts
-cooldown_secs = 300         # 5-minute cooldown after trip
+SQLite file:
+
+```text
+engine/data/trades.db
 ```
 
-### Venue Configuration
-
-```toml
-[venues.draftkings]
-mode = "paper"              # "paper" | "live" | "disabled"
-initial_balance = 1000.00
-max_stake = 500.00
-min_stake = 1.00
-max_bets_per_hour = 3
-
-[venues.pinnacle]
-mode = "paper"
-initial_balance = 2000.00
-max_stake = 1000.00
-min_stake = 1.00
-max_bets_per_hour = 5
-```
-
-### Paper Trading Simulation
-
-```toml
-[paper_trading]
-enabled = true
-random_seed = 42          # Deterministic (reproducible) simulation
-fill_rate = 0.85          # 85% of bets fill successfully
-partial_fill_rate = 0.10  # 10% partial fills
-odds_drift_rate = 0.15    # 15% chance of odds moving
-rejection_rate = 0.05     # 5% outright rejection
-min_latency_ms = 500
-max_latency_ms = 2000
-```
-
-## Module Reference
-
-### Core Detection
-
-| Module | Lines | Description |
-|--------|-------|-------------|
-| `arb_detector.rs` | 450+ | Sigma-based arbitrage detection with Pinnacle filter and near-miss tracking |
-| `identity.rs` | 281 | Market identity matching across venues (moneyline, spread, total, team_total) |
-| `book.rs` | 151 | In-memory order book: identity key -> (venue+selection -> price entry) |
-| `canonical.rs` | 40 | `CanonicalMarket` struct - the universal schema for all market data |
-
-### Execution
-
-| Module | Lines | Description |
-|--------|-------|-------------|
-| `stake_optimizer.rs` | 283 | Unconstrained/constrained stake calculation with $5 humanized rounding |
-| `paper_executor.rs` | 137 | Simulated bet placement with configurable latency, drift, and rejection |
-| `state_machine.rs` | 184 | 18-state trade lifecycle FSM (CANDIDATE_DETECTED through RECONCILED) |
-| `rescue_hedger.rs` | 191 | Automatic hedge computation when leg 2 fails after leg 1 fills |
-
-### Risk Management
-
-| Module | Lines | Description |
-|--------|-------|-------------|
-| `policy.rs` | 133 | 10 policy gates - ALL must pass before execution |
-| `circuit_breaker.rs` | 218 | Loss breaker + rejection rate breaker with cooldown |
-| `rate_limiter.rs` | 129 | Per-venue sliding 1-hour bet rate limits |
-| `odds_verifier.rs` | 216 | Pre-execution odds drift verification (leg 1 and leg 2) |
-| `treasury.rs` | 171 | 3-state capital tracking (free/reserved/in_flight) per venue |
-
-### Diagnostics
-
-| Module | Lines | Description |
-|--------|-------|-------------|
-| `metrics.rs` | 417 | Funnel metrics, sigma histograms, dimensional tracking, gate rejections |
-| `opportunity_tracker.rs` | 213 | Arb window half-life analysis (P25/P50/P75 latency) |
-| `near_miss.rs` | 263 | Ring buffer tracking near-misses that later cross into arb territory |
-
-### Persistence
-
-| Module | Lines | Description |
-|--------|-------|-------------|
-| `db.rs` | 492 | PostgreSQL migrations, trade persistence, balance snapshots, diagnostics |
-| `trade_ledger.rs` | 167 | Append-only JSONL trade records (survives DB outages) |
-| `trades.rs` | 174 | Structured trade event logging (ARB_DETECTED, LEG_FILL, RESCUE_*, etc.) |
-
-### Infrastructure
-
-| Module | Lines | Description |
-|--------|-------|-------------|
-| `main.rs` | 1080 | Event loop, orchestration, graceful shutdown |
-| `config.rs` | 235 | TOML config loading with serde defaults |
-| `redis_bridge.rs` | 95 | Redis Streams read/write (markets, fills, commands) |
-| `logging.rs` | 59 | Tracing setup: stdout + core.log + trades.log with daily rotation |
-
-## How Arbitrage Detection Works
-
-### The Math
-
-For any two-outcome market (moneyline, over/under, spread), arbitrage exists when:
-
-```
-sigma = 1/odds_leg1 + 1/odds_leg2 < 1.0
-```
-
-If sigma < 1.0, you can split capital across both sides and guarantee profit regardless of outcome:
-
-```
-guaranteed_profit = capital / sigma - capital
-```
-
-### Detection Pipeline
-
-```
-Markets ingested from Redis
-    |
-    v
-Book updated (identity key -> venue -> price entry)
-    |
-    v
-Group by identity key (same event + market + line + period + OT rules)
-    |
-    v
-Find complementary selections (LAL vs BOS, over vs under)
-    |
-    v
-Cross-venue comparison: all venue pairs for each complementary pair
-    |
-    v
-Pinnacle filter: skip pairs without Pinnacle leg (if enabled)
-    |
-    v
-Sigma calculation: 1/o1 + 1/o2
-    |
-    v
-sigma < 1.0 -> ArbCandidate (sorted by arb_pct descending)
-1.0 <= sigma < 1.02 -> Near-miss (tracked for later-crossing analysis)
-sigma >= 1.02 -> No value (recorded in histogram only)
-```
-
-### Stake Optimization
-
-1. **Unconstrained**: Deploy capital to lock guaranteed profit
-   - `s1 = capital * (1/odds1) / sigma`
-   - `s2 = capital * (1/odds2) / sigma`
-
-2. **Constrained**: Respect per-venue min/max stake limits
-   - Scale down proportionally if maxes exceeded
-   - Reject if profit becomes zero or negative
-
-3. **Humanized**: Round to nearest $5 increments
-   - Tests all 4 combinations (floor/ceil per leg)
-   - Selects maximum profitable option
-   - Falls back to exact stakes if no rounding is profitable
-
-## Trade Lifecycle (State Machine)
-
-```
-CANDIDATE_DETECTED
-    |
-    v
-SIZING -> StakePlan computed
-    |
-    v
-CAPITAL_RESERVED -> Treasury locks funds
-    |
-    v
-LEG1_SUBMITTED -> LEG1_AWAITING
-    |
-    +---> LEG1_FILLED -----> LEG2_SUBMITTED -> LEG2_AWAITING
-    |         |                                      |
-    |         |                +---------------------+
-    |         |                |                     |
-    |         |         LEG2 FILLED            LEG2 FAILED
-    |         |                |                     |
-    |         |         EXECUTION_CLOSED       RESCUE_NEEDED
-    |         |         (locked profit)              |
-    |         |                               RESCUE_COMPUTED
-    |     LEG1_PARTIAL                               |
-    |     (scale leg2)                        RESCUE_SUBMITTED
-    |                                           |         |
-    +---> LEG1_REJECTED                   RESCUE_CLOSED  ABORT_AND_ESCALATE
-    |     (release all)                   (hedged loss)  (manual intervention)
-    |
-    +---> LEG1_UNKNOWN
-          (block venue, manual resolution required)
-```
-
-## Risk Management Layers
-
-The engine has **5 independent safety layers** that protect capital:
-
-### Layer 1: Policy Gates (10 checks)
-
-ALL must pass before any capital is reserved:
-
-| Gate | Check | Default |
-|------|-------|---------|
-| Identity Confidence | Market match quality >= threshold | 0.95 |
-| Data Age | Quote freshness <= max age | 60s |
-| Event Time | Pre-game starts in >= buffer (live: skipped) | 60s |
-| Min Stake | Both legs >= minimum | $5 |
-| Min Profit | Guaranteed profit >= minimum | $0.50 |
-| Venue Balance | Free balance >= required stake | per-venue |
-| Source Health | Venue sent data within threshold | 30s |
-| Rate Limit | Bets/hour within venue limit | 3-5/hr |
-| Odds Drift | Current vs detected odds within tolerance | 3% |
-| Circuit Breaker | Not tripped | see below |
-
-### Layer 2: Circuit Breaker
-
-Automatically stops all trading when losses accumulate:
-
-- **Loss breaker**: Trips if cumulative loss exceeds $50 in 30 minutes
-- **Rejection breaker**: Trips if >50% of last 10 attempts were rejected
-- **Cooldown**: 5-minute pause after either breaker trips
-- Resets automatically after cooldown
-
-### Layer 3: Rate Limiter
-
-Per-venue sliding 1-hour windows prevent account flagging:
-
-- DraftKings: 3 bets/hour
-- FanDuel: 3 bets/hour
-- Pinnacle: 5 bets/hour (sharper book, more tolerant)
-
-### Layer 4: Odds Verification
-
-Pre-execution drift checks at two critical points:
-
-1. **Before capital reservation**: Verify both legs haven't moved >3%
-2. **Before leg 2 execution**: Re-verify after leg 1 fills (if drifted, go straight to rescue)
-
-### Layer 5: Rescue Hedging
-
-When leg 2 fails after leg 1 fills, the engine automatically:
-
-1. Finds best available odds for the opposite side on ANY venue
-2. Computes rescue stake to minimize worst-case loss
-3. Validates worst-case loss <= `max_rescue_loss` ($25 default)
-4. Executes rescue bet
-5. If no feasible rescue exists: escalates to `ABORT_AND_ESCALATE` (manual review)
-
-## Redis Interface
-
-### Input: Market Data
-
-The engine reads from Redis Streams named `markets:{venue}`:
-
-```json
-{
-  "event_id": "NBA:2026-03-15:LAL-vs-BOS",
-  "sport": "NBA",
-  "league": "NBA",
-  "market_type": "moneyline",
-  "selection": "LAL",
-  "decimal_odds": 2.50,
-  "venue": "draftkings",
-  "received_at_ms": 1711000000000,
-  "is_live": false,
-  "period": "full_game",
-  "includes_overtime": true,
-  "push_treatment": "void"
-}
-```
-
-See `canonical.rs` for the full `CanonicalMarket` schema (28 fields).
-
-### Output: Commands
-
-Bet placement commands are published to Redis Pub/Sub `commands:{venue}`:
-
-```json
-{
-  "action": "place_bet",
-  "venue": "draftkings",
-  "selection": "LAL",
-  "market_type": "moneyline",
-  "stake": 50.0,
-  "odds": 2.50,
-  "venue_market_id": "dk:12345"
-}
-```
-
-### Output: Fill Reports
-
-Fill results are read from Redis Streams `fills:{venue}`:
-
-```json
-{
-  "status": "filled",
-  "accepted_stake": 50.0,
-  "accepted_odds": 2.48
-}
-```
-
-## Database Schema
-
-Auto-migrated on startup. Key tables:
+Tables are auto-created in `db.rs`:
 
 | Table | Purpose |
-|-------|---------|
-| `arb_attempts` | Full trade audit trail (UUID, event, both legs, sigma, profit, state timeline) |
-| `paper_trading_balance` | Per-venue balance snapshots (free/reserved/in_flight) |
-| `venue_reliability` | Fill rates, rejection counts, avg latency per venue |
-| `source_health` | Data feed connectivity monitoring |
-| `funnel_metrics` | Periodic snapshots of the detection-to-execution funnel |
-| `sigma_histograms` | Distribution of sigma values by venue pair, sport, market type |
-| `near_miss_records` | Markets within 2% of arb threshold |
-| `opportunity_lifespans` | Arb window duration analysis |
-| `gate_rejections` | Policy gate failure attribution |
-
-## Logging
-
-Three-tier output:
-
-| Destination | Level | Content |
-|-------------|-------|---------|
-| `stdout` | INFO+ | Human-readable, colored |
-| `logs/core.log` | DEBUG+ | All events, timestamped, daily rotation |
-| `logs/trades.log` | Trade events only | ARB_DETECTED, LEG_FILL, EXECUTION_CLOSED, RESCUE_* |
-| `logs/trade_ledger/*.jsonl` | All attempts | Append-only JSONL (survives DB outages) |
-
-## Diagnostic Instrumentation
-
-The engine continuously tracks performance metrics:
-
-### Funnel Metrics (12 stages)
-
-```
-markets_ingested -> markets_normalized -> cross_venue_groups ->
-complementary_pairs -> sigma_qualified -> near_misses ->
-policy_passing -> execution_attempted -> leg1_filled ->
-trades_completed + rescues_triggered -> rescues_completed + trades_aborted
-```
-
-Logged every 30 seconds with atomic counters.
-
-### Sigma Histogram (8 buckets)
-
-Tracks the distribution of all sigma values:
-- Deep arb (< 0.98), Quality arb (0.98-0.99), Marginal arb (0.99-1.00)
-- Near miss (1.00-1.005, 1.005-1.01, 1.01-1.02)
-- No value (1.02-1.05, >= 1.05)
-
-### Dimensional Sigma Tracking
-
-Sigma histograms broken down by:
-- Venue pair (DK-FD, DK-PIN, FD-PIN)
-- Sport (NBA, NFL, MLB, etc.)
-- Market type (moneyline, spread, total)
-- Live vs pre-game
-
-### Opportunity Half-Life
-
-Tracks how long arb windows last:
-- P25/P50/P75 duration in milliseconds
-- Whether opportunities reached execution before closing
-- Death reason classification
-
-## Supported Markets
-
-| Market Type | Complementary Logic |
-|-------------|-------------------|
-| Moneyline | Any two different teams |
-| Spread | Two different teams (line symmetry enforced by identity key) |
-| Total (Over/Under) | Over vs Under |
-| Team Total | Over vs Under (same team scope) |
+| --- | --- |
+| `book_balances` | Venue balances and initial balances |
+| `paper_trades` | Paper and live trade records |
+| `arb_opportunities` | Detected candidate log |
+| `settings` | Mutable execution settings |
 
 ## Supported Venues
 
-| Venue | Type | Notes |
-|-------|------|-------|
-| Pinnacle | Sharp | Hedge leg, highest rate limit |
-| DraftKings | Soft | Value leg, lower rate limit |
-| FanDuel | Soft | Value leg, lower rate limit |
+| Venue | Role | Live Placement |
+| --- | --- | --- |
+| DraftKings | Soft book | Yes, through Patchright browser cookies |
+| FanDuel | Soft book | Yes, through Patchright context requests |
+| Pinnacle | Sharp book | Yes, through browser-extracted session token and direct API calls |
 
-## Development
+## Supported Sports
 
-### Adding a New Venue
+NBA, NHL, MLB, NFL, NCAAB, NCAAF, soccer through FanDuel event type, EPL, La Liga, Serie A, Bundesliga, Ligue 1, UCL, MLS, and UFC.
 
-1. Add venue config to `config.toml` under `[venues.newvenue]`
-2. Start publishing to Redis Stream `markets:newvenue` from your ingestion service
-3. The engine auto-discovers new streams on startup
+## Current Gaps
 
-### Adding a New Market Type
-
-1. Add complementarity logic to `are_selections_complementary()` in `arb_detector.rs`
-2. Add identity key construction in `identity.rs`
-3. Update tests
-
-### Switching to Live Trading
-
-1. Set `mode = "live"` in venue config
-2. Implement executor service that subscribes to `commands:{venue}` and publishes to `fills:{venue}`
-3. Set `paper_trading.enabled = false`
+- `cargo check` passes, but `cargo test` currently fails to compile because test fixtures are stale after model changes.
+- No JavaScript test runner is configured.
+- Rescue hedging is implemented but not wired into live execution.
+- Treasury/reservation accounting exists but is unused.
+- State machine and structured trade logging exist but are unused.
+- No WebSocket reconnect loop from engine to bet placer.
+- No alerting for one-sided exposure.
+- No settlement reconciliation or actual realized P&L tracking.
+- FanDuel balance reading is DOM-scraped and fragile.
+- DraftKings wager client version headers are hardcoded.
 
 ## License
 

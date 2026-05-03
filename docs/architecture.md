@@ -1,191 +1,297 @@
-# Architecture
+# Architecture (V5 Current State)
 
-## System Overview
+This document describes the current V5 architecture as implemented in the codebase. The project is a local sportsbook arbitrage system for Ontario accounts. It continuously collects public odds, normalizes them into a shared market model, detects two-leg arbitrage candidates, and can either simulate trades in paper mode or place live bets through browser-backed sportsbook sessions.
 
-Sports-arb-h2 is an automated sports arbitrage detection and execution system. It continuously scans odds from three sportsbooks (DraftKings, FanDuel, Pinnacle), detects cross-venue arbitrage opportunities where guaranteed profit exists, and places both legs automatically via stealth browser sessions.
+The system is intentionally local-first:
 
-The system is split into three processes that communicate over WebSocket and HTTP:
+- Rust owns odds ingestion, normalization, detection, sizing, persistence, REST, and dashboard WebSocket broadcasts.
+- Node owns browser automation and authenticated live bet placement.
+- SQLite is the only database.
+- There is no external queue, cloud database, or remote worker.
 
-```
-                                    ┌─────────────────────────────────┐
-                                    │  Rust Engine (port 3401)        │
-                                    │                                 │
-                                    │  Polls odds every 5s:           │
-                                    │  - DK via dk-proxy (port 3403)  │
-                                    │  - FD direct HTTP               │
-                                    │  - PIN direct HTTP              │
-                                    │                                 │
-                                    │  In-memory order book           │
-                                    │  Arb detection (sigma < 1.0)    │
-                                    │  Safety: drift, circuit breaker │
-                                    │  SQLite persistence             │
-                                    │  REST API for settings          │
-                                    └───────────┬─────────────────────┘
-                                                │ WebSocket (port 3402)
-                                                │ PlaceBetCommand / FillReport
-                                                ▼
-┌────────────────┐              ┌──────────────────────────────────────┐
-│  DK Proxy      │              │  Bet Placer (port 3402)        │
-│  (port 3403)   │              │                                      │
-│  Node.js HTTP  │              │  3 Patchright Chrome windows:        │
-│  proxy for DK  │              │  - DraftKings  (page.evaluate)       │
-│  odds fetching │              │  - FanDuel     (context.request)     │
-│  (TLS fix)     │              │  - Pinnacle    (context.request)     │
-└────────────────┘              │                                      │
-                                │  Receives bet commands via WS        │
-                                │  Routes to correct adapter           │
-                                │  Returns fill reports                │
-                                └──────────────────────────────────────┘
-```
+## Process Topology
 
-## Components
-
-### Rust Engine (`engine/`)
-
-The brain of the system. Runs a Tokio async runtime with:
-
-- **Odds Fetcher** (`odds_fetcher.rs`) — Concurrent HTTP fetchers for DK (via proxy), FD, and Pinnacle. Fetches 15+ endpoints in parallel every 5 seconds.
-- **Order Book** (`models.rs`) — Two-level HashMap: `MarketIdentityKey -> VenueSelectionKey -> PriceEntry`. Groups the same bet across venues for comparison.
-- **Arb Detector** (`arb_detector.rs`) — Safety filter chain. Blocks 3-way soccer moneylines, partial-period MLs (which now also catches FD's "60 Min Moneyline (3 Way)" via the period mapping), validates spread sign complementarity, requires Pinnacle leg. Supports moneyline, spread, total, alt_spread, alt_total, player_prop.
-- **Team Names** (`team_names.rs`) — 200+ team name normalizations. Draw normalization. Player prop parsing. Event IDs include hour for doubleheader disambiguation. Epoch date parsing with hash fallback.
-- **Stake Optimizer** (`stake_optimizer.rs`) — Proportional stake sizing with balance-aware scaling. Scales down to fit venue balances instead of rejecting.
-- **Live Executor** (`live_executor.rs`) — WebSocket bet execution. Soft-book-first ordering. Two-stage sigma revalidation (quote + post-fill). Pre-flight Pinnacle quote with stake adjustment. 20s fill timeout.
-- **Paper Executor** (`paper_executor.rs`) — Simulated instant fills with balance-aware scaling.
-- **Safety Systems**:
-  - Odds drift verification — rejects if odds moved >5% since detection (`odds_verifier.rs`)
-  - Circuit breaker — pauses trading on excessive losses or rejections (`circuit_breaker.rs`)
-  - Rate limiter — per-venue sliding window bet limits (`rate_limiter.rs`)
-  - Rescue hedger — computes hedge when leg 2 fails after leg 1 fills (`rescue_hedger.rs`, not wired up)
-- **SQLite DB** (`db.rs`) — Persists balances, trades, arb opportunities, settings.
-- **REST API** (`api.rs`) — Axum handlers on port 3401 for settings, balances, trades, stats.
-- **WebSocket Broadcaster** (`ws.rs`) — Pushes real-time events to any connected client.
-
-### Bet Placer (`bet-placer/`)
-
-The hands of the system. A Node.js process that:
-
-1. Launches 3 Patchright (stealth Playwright) Chrome windows — one per sportsbook
-2. Holds authenticated sessions (cookies, localStorage tokens)
-3. Runs a WebSocket server on port 3402
-4. Receives `PlaceBetCommand` from the engine, routes to the correct adapter, returns `FillReport`
-5. Provides a CLI for manual operations (`balance`, `bet`, `info`, `status`)
-
-### DK Proxy (`dk-proxy.js`)
-
-A minimal Node.js HTTP proxy on port 3403. The Rust engine's `reqwest` library cannot complete TLS handshakes with DraftKings' CDN on Windows. The proxy uses Node's `fetch` to relay DK odds API requests.
-
-## Sportsbook Adapters
-
-### DraftKings (`draftkings.js`)
-
-- **Auth**: HttpOnly browser cookies sent via `credentials: "include"` in `page.evaluate(fetch(...))`
-- **Bet flow**: `getSelectionInfo()` -> `calculateBets()` (returns `token` + `calculationId`) -> `placeBet()` -> `waitForConfirmation()` (poll up to 15s)
-- **Host**: `gaming-ca-on.draftkings.com/api/wager/v1`
-- **Selection ID format**: `0ML{marketId}_{outcomeIndex}` (moneyline), `0HC{marketId}...` (spread), `0OU{marketId}...` (total)
-- **Spread/total placement**: Requires `points` field in `selections` array of `placeBets` (e.g., `points: 1.5`). Passed through from `calculateBets` response. Without it, DK returns `NewOffer` and refunds.
-
-### FanDuel (`fanduel.js`)
-
-- **Auth**: JWT tokens from `localStorage["session-sportsbook"]` and `localStorage["location_token"]`, plus PerimeterX cookies via `context.cookies()`
-- **Bet flow**: `getMarketPrices()` -> `implyBets()` (returns `betReference`) -> `placeBet()`
-- **All requests via `context.request.post()`** (Node-side HTTP) — bypasses PerimeterX CORS blocking
-- **Hosts**: `sib.on.sportsbook.fanduel.ca` (imply), `spb.on.sportsbook.fanduel.ca` (place), `smp.on.sportsbook.fanduel.ca` (prices)
-- **Selection ID format**: `{marketId}:{selectionId}` (e.g., `801.161172464:60427`)
-
-### Pinnacle (`pinnacle.js`) — Hybrid Adapter
-
-- **Auth**: Three headers — `x-api-key` (static app key), `x-device-uuid`, `x-session` (extracted from browser localStorage, auto-refreshed every 5 min)
-- **HTTP transport**: Direct `fetch()` (not context.request) — faster than browser-based requests. Browser stays open as token source only.
-- **Bet flow**: `quote()` (returns `marketId` + current `price` + min/max stakes) -> `placeBet()` (returns `PENDING_ACCEPTANCE`) -> poll `GET /bets?requestIds=` until accepted (~7-8s)
-- **Host**: `api.arcadia.pinnacle.com/0.1`
-- **Selection ID format**: `{matchupId}:{marketKey}:{designation}` (e.g., `1627197304:s;0;m:home`)
-- **No PerimeterX** — cleanest API of the three
-
-## In-Memory Order Book
-
-The book uses a two-level HashMap to group prices from different venues for the same bet:
-
-```
-MarketIdentityKey (event_id + market_type + line + period + is_live)
-  └── VenueSelectionKey (venue + selection)
-        └── PriceEntry (odds, timestamp, metadata)
+```text
+Public odds APIs
+  DraftKings public odds
+  FanDuel public odds
+  Pinnacle guest odds
+        |
+        v
+Rust arb engine (engine/)
+  polls every 5 seconds
+  normalizes markets and teams
+  detects arbs
+  sizes trades
+  writes SQLite
+  serves REST and dashboard WebSocket
+        |
+        | live mode only: ws://127.0.0.1:3402
+        v
+Node bet placer (bet-placer/)
+  Patchright persistent Chrome profiles
+  DraftKings adapter
+  FanDuel adapter
+  Pinnacle adapter
+        |
+        v
+Authenticated sportsbook sessions
 ```
 
-Example:
-```
-NBA:2026-04-01:BOS-vs-MIA | moneyline | null | full_game | false
-  ├── (draftkings, BOS) → 1.50, received 1711700001234
-  ├── (fanduel, BOS)    → 1.48, received 1711700001456
-  ├── (pinnacle, BOS)   → 1.55, received 1711700001100
-  ├── (draftkings, MIA) → 2.64, received 1711700001234
-  ├── (fanduel, MIA)    → 2.70, received 1711700001456
-  └── (pinnacle, MIA)   → 2.60, received 1711700001100
+There is one supporting Node process:
+
+```text
+Rust DK fetcher -> http://localhost:3403/dk/{leagueId} -> dk-proxy.js -> DraftKings public odds
 ```
 
-Entries expire after 30 seconds (`MAX_DATA_AGE_MS`). The book uses diff-based updates — only entries where odds actually changed are written.
+`dk-proxy.js` exists because the Rust `reqwest` client has had TLS trouble with DraftKings' CDN on Windows. The Rust fetcher tries the local proxy first and then falls back to the direct DraftKings URL.
 
-## WebSocket Protocol (Engine <-> Bet Placer)
+## Runtime Processes
 
-**Engine -> Listener:**
-```json
-{"type":"place_bet","attempt_id":"uuid-L1","venue":"pinnacle","venue_market_id":"1627197304:s;0;m:home","selection":"LAC","stake":1.27,"expected_odds":1.95}
-{"type":"get_balances"}
-{"type":"ping"}
+| Process | Default port | Entry point | Role |
+| --- | ---: | --- | --- |
+| Rust engine | 3401 | `engine/src/main.rs` | Odds polling, detection, trade execution, REST API, dashboard WebSocket |
+| Bet placer | 3402 | `bet-placer/index.js` | WebSocket bridge from Rust to authenticated browser betting flows |
+| DraftKings proxy | 3403 | `dk-proxy.js` | Fetches DraftKings public odds with Node `fetch` |
+
+When the Rust engine is run from `engine/`, its SQLite path is `engine/data/trades.db`. The code opens `data/trades.db` relative to the current working directory.
+
+## Rust Engine
+
+The engine binary is configured in `engine/Cargo.toml` as `arb-engine`. The package name still contains the older `arb-engine-v3` label, but the running system described by these docs is V5.
+
+Major Rust modules:
+
+| File | Current responsibility |
+| --- | --- |
+| `main.rs` | Process startup, settings overrides, polling loop, live/paper branch, REST routes |
+| `config.rs` | Hardcoded sports, league IDs, public odds hosts, poll timing, venue list |
+| `odds_fetcher.rs` | DraftKings, FanDuel, and Pinnacle public odds ingestion and canonical market creation |
+| `team_names.rs` | Team/fighter/selection normalization and canonical event ID generation |
+| `models.rs` | Core data structures, settings, API models, dashboard WebSocket events |
+| `arb_detector.rs` | Two-leg arb detection and market safety filters |
+| `odds_verifier.rs` | Pre-execution odds drift check against the in-memory book |
+| `stake_optimizer.rs` | Sigma-based stake sizing and balance-aware scaling |
+| `paper_executor.rs` | Paper execution with instant theoretical settlement |
+| `live_executor.rs` | Live WebSocket command protocol and live two-leg execution |
+| `db.rs` | SQLite schema, migrations, balances, trades, arbs, settings |
+| `api.rs` | Axum REST handlers and dashboard WebSocket upgrade |
+| `ws.rs` | Broadcast channel used by dashboard clients |
+| `circuit_breaker.rs` | Loss/rejection circuit breaker type |
+| `rate_limiter.rs` | Per-venue sliding window limiter type |
+| `state_machine.rs` | Rich attempt-state model, currently not wired into the main execution path |
+| `rescue_hedger.rs` | Rescue hedge calculator, currently not wired into live execution |
+| `policy.rs` | Multi-gate policy helper, currently not the primary runtime gate path |
+| `treasury.rs` | Free/reserved/in-flight balance model, currently not wired into runtime accounting |
+| `trades.rs` | Structured trade logging helpers, partially available but not the primary persistence path |
+
+## Odds Ingestion
+
+`odds_fetcher::fetch_all` spawns concurrent fetches for all configured sports and venues.
+
+Current venue behavior:
+
+- DraftKings odds use `http://localhost:3403/dk/{leagueId}` first, then fall back to `https://sportsbook-nash.draftkings.com/sites/CA-ON-SB/api/sportscontent/dkcaon/v1/leagues/{leagueId}`.
+- FanDuel odds use Ontario content-managed-page endpoints with `_ak=FhMFpcPWXMeyZxOx`. Normal pages use `page=CUSTOM`; soccer uses `page=SPORT&eventTypeId=1`.
+- Pinnacle odds use guest Arcadia endpoints under `https://guest.api.arcadia.pinnacle.com/0.1`.
+
+Supported configured sports include NBA, NHL, MLB, NFL, NCAAB, NCAAF, major soccer leagues, MLS, and UFC. NFL is configured for DraftKings and FanDuel only because the current Pinnacle NFL guest league ID path is disabled in code after returning 401.
+
+## Canonical Market Model
+
+Each public price becomes a `CanonicalMarket`:
+
+- `event_id`
+- `sport`
+- `league`
+- `start_time_utc`
+- `market_type`
+- `selection`
+- `line`
+- `period`
+- `is_live`
+- `decimal_odds`
+- `american_odds`
+- `venue`
+- `venue_market_id`
+- `venue_event_id`
+- `received_at_ms`
+
+Canonical event IDs are generated by `team_names::canonical_event_id`. Team codes are normalized, sorted alphabetically, and combined with sport plus date/hour when available:
+
+```text
+NBA:2026-03-15T19:BOS-vs-GSW
 ```
 
-**Listener -> Engine:**
-```json
-{"type":"fill_report","attempt_id":"uuid-L1","status":"filled","accepted_stake":1.27,"accepted_odds":1.95,"error_message":null}
-{"type":"balances","balances":[{"venue":"draftkings","balance":6.92},{"venue":"fanduel","balance":19.65},{"venue":"pinnacle","balance":3932.00}]}
-{"type":"balance_update","venue":"pinnacle","balance":3930.73}
-{"type":"pong"}
+The current implementation sorts teams so the same game matches across venues even when one source says "away at home" and another source reverses the order. This also means the `A-vs-B` portion is not necessarily away-vs-home.
+
+Market identity uses `MarketIdentityKey`:
+
+```text
+event_id + market_type + line_key + period + is_live + player_key
 ```
 
-## File Structure
+For spreads, `line_key` uses the absolute value so `-1.5` and `+1.5` land in the same market bucket. The detector then separately verifies the two spread legs have opposite signs.
 
+## Detection Strategy
+
+The detector is deliberately conservative:
+
+- Only two-leg complements are considered.
+- Three-way soccer moneyline markets are skipped because two-leg home/away arbs ignore draw.
+- Partial-period moneylines are skipped because ties/push semantics make them unsafe.
+- Draw selections are rejected in moneyline complements.
+- Totals require `over` vs `under`.
+- Spreads require different selections and opposite line signs.
+- The current main loop requires at least one Pinnacle leg for execution candidates.
+- Candidates are sorted by `arb_pct` descending.
+
+Arb math:
+
+```text
+sigma = 1 / leg1_decimal_odds + 1 / leg2_decimal_odds
+arb_pct = 1 - sigma
+roi = 1 / sigma - 1
 ```
-sportsbook-arbitrage/
-├── engine/                         <- Rust (Tokio + Axum)
-│   ├── Cargo.toml
-│   ├── .cargo/config.toml          <- MSVC linker paths
-│   └── src/
-│       ├── main.rs                 <- Entry point, polling loop
-│       ├── config.rs               <- Sports/leagues, API hosts, constants
-│       ├── models.rs               <- Data structures, order book
-│       ├── odds_fetcher.rs         <- DK/FD/PIN odds fetchers
-│       ├── team_names.rs           <- 200+ team name normalizations
-│       ├── arb_detector.rs         <- Sigma calc, cross-venue detection
-│       ├── stake_optimizer.rs      <- Proportional stake sizing
-│       ├── live_executor.rs        <- WebSocket bet execution
-│       ├── paper_executor.rs       <- Simulated execution
-│       ├── odds_verifier.rs        <- Drift check (3% threshold)
-│       ├── circuit_breaker.rs      <- Loss/rejection rate breaker
-│       ├── rate_limiter.rs         <- Per-venue bet limits
-│       ├── rescue_hedger.rs        <- Hedge computation (future)
-│       ├── policy.rs               <- Multi-gate validation (future)
-│       ├── state_machine.rs        <- Trade lifecycle FSM (future)
-│       ├── treasury.rs             <- Capital tracking (future)
-│       ├── trades.rs               <- Structured logging (future)
-│       ├── db.rs                   <- SQLite persistence
-│       ├── api.rs                  <- REST handlers
-│       └── ws.rs                   <- WebSocket broadcaster
-├── bet-placer/               <- Node.js + Patchright
-│   ├── package.json
-│   ├── index.js                    <- WS server, adapter dispatch, CLI
-│   └── src/
-│       ├── browser-manager.js      <- Patchright browser lifecycle
-│       ├── arb-placer.js           <- Parallel bet coordinator
-│       └── sportsbooks/
-│           ├── index.js            <- URL registry
-│           ├── draftkings.js       <- DK adapter
-│           ├── fanduel.js          <- FD adapter
-│           └── pinnacle.js         <- PIN adapter
-├── dk-proxy.js                     <- DK TLS proxy (port 3403)
-├── data/                           <- Runtime data (gitignored)
-│   ├── profiles/                   <- Chromium user data per book
-│   ├── cookies/                    <- Session snapshots
-│   └── trades.db                   <- SQLite database
-├── docs/                           <- Documentation
-├── CLAUDE.md                       <- AI assistant context
-└── session.md                      <- Project history
-```
+
+An arb exists only when `sigma < 1.0`.
+
+## Execution Path
+
+The engine has paper and live execution branches.
+
+Paper mode:
+
+- Uses current SQLite balances.
+- Sizes stakes with `stake_optimizer::compute_stakes_with_balances`.
+- Deducts both stakes.
+- Immediately credits stake plus theoretical profit share back to both venues.
+- Persists a `paper_trades` row with status `executed`.
+
+Live mode:
+
+- Connects to the bet placer at `WS_URL` or `ws://127.0.0.1:3402`.
+- Fetches real balances with `get_balances`.
+- If the initial WebSocket connection fails, the engine logs a warning and continues using paper execution even when `LIVE_MODE=1`.
+- Places the softer book first and Pinnacle second when Pinnacle is involved.
+- Runs a Pinnacle `quote_bet` preflight before either leg is placed.
+- Adjusts Pinnacle stake to quoted min/max and recalculates the opposite leg.
+- Aborts if quote sigma or post-leg-1 sigma closes the arb.
+- Persists a trade with status `executed_live` only after both legs fill.
+
+Current live execution caveat: `rescue_hedger.rs` exists, but live execution does not automatically hedge if leg 2 fails after leg 1 fills. The logs warn about one-sided exposure and manual intervention is still required.
+
+## Runtime Gates
+
+The current main loop applies these runtime gates before execution:
+
+- Candidate must be detected from fresh data (`MAX_DATA_AGE_MS`, hardcoded 30000 ms).
+- Candidate must include Pinnacle because `require_pinnacle_leg` is currently `true` in `main.rs`.
+- Candidate odds must still be present in the in-memory book.
+- Odds drift must be at or below 5% per leg.
+- `SKIP_LIVE=1` skips live markets.
+- Pregame events farther out than `MAX_HOURS_TO_START` are skipped. Default is 24 hours.
+- Duplicate trade keys are skipped after a trade has already been executed.
+- `settings.enabled` must be true.
+- `settings.min_arb_pct` is enforced inside paper/live executors.
+- Stake plans must meet minimum capital/profit constraints and venue balances.
+
+Types for circuit breaking and rate limiting are present. In the current `main.rs`, the circuit breaker is instantiated with a $500 loss threshold over 3600 seconds, a 50% rejection threshold over 20 records, and a 60 second cooldown. The per-venue rate limiter is initialized at 200 bets/hour. Treat these as local runtime safeguards, not exchange-grade risk management.
+
+## Bet Placer
+
+The Node bet placer launches one persistent Chrome context per live book:
+
+- DraftKings
+- FanDuel
+- Pinnacle
+
+It uses Patchright with persistent profiles under `data/profiles/{book}`. Cookies are saved under `data/cookies/{book}-data.json` when the process exits through the CLI `quit`/`exit` flow. The current `saveCookies` path assumes `data/cookies` already exists.
+
+The bet placer listens on `ws://localhost:3402` by default and accepts:
+
+- `place_bet`
+- `quote_bet`
+- `get_balances`
+- `ping`
+
+Adapter transports:
+
+- DraftKings betting calls run inside the DraftKings page via `page.evaluate(fetch(..., credentials: "include"))`.
+- FanDuel betting calls use Patchright `context.request` with extracted auth, geo, and PX headers.
+- Pinnacle betting calls use direct Node `fetch` with `x-api-key`, `x-device-uuid`, and `x-session` headers.
+
+The keepalive timer reloads each running sportsbook page every 5 minutes. That keeps sessions warm, but it can race with manual/browser state or an active betting flow.
+
+## Persistence
+
+SQLite schema in `db.rs`:
+
+- `book_balances`
+- `paper_trades`
+- `arb_opportunities`
+- `settings`
+
+Defaults are seeded with `INSERT OR IGNORE`, so existing local DB values are preserved.
+
+Default settings:
+
+| Setting | Default |
+| --- | ---: |
+| `enabled` | `true` |
+| `min_arb_pct` | `0.5` |
+| `max_stake` | `50` |
+| `stake_mode` | `fixed` |
+| `fixed_stake` | `25` |
+| `proportional_pct` | `5` |
+
+Environment variables can override settings at startup:
+
+- `FIXED_STAKE`
+- `MAX_STAKE`
+- `MIN_ARB_PCT`
+- `STAKE_MODE`
+- `PROPORTIONAL_PCT`
+- `ENABLED`
+
+Additional runtime environment variables:
+
+- `LIVE_MODE`
+- `SKIP_LIVE`
+- `MAX_HOURS_TO_START`
+- `BALANCE_REFRESH_CYCLES`
+- `WS_URL`
+- `WS_PORT`
+- `DK_PROXY_PORT`
+
+`engine/config.toml` is currently legacy/stale relative to the runtime code. The live settings path is SQLite plus startup environment overrides, and most strategy/policy values in `config.toml` are not loaded by `main.rs`.
+
+## Dashboard API
+
+The Rust engine serves Axum on `0.0.0.0:3401` with permissive CORS:
+
+- `GET /api/balances`
+- `POST /api/balances/deposit`
+- `POST /api/balances/withdraw`
+- `POST /api/balances/reset`
+- `GET /api/trades`
+- `GET /api/arbs`
+- `GET /api/stats`
+- `GET /api/settings`
+- `POST /api/settings`
+- `POST /api/reset`
+- `GET /ws`
+
+There is no authentication or authorization on this API. Run it only on a trusted local network, or bind/firewall it before exposing it beyond the local machine.
+
+## Current Shortcomings
+
+- The engine REST API binds to `0.0.0.0` and has no auth.
+- Live WebSocket reconnect is not implemented after startup.
+- If live mode cannot connect to the bet placer during startup, execution falls back to paper mode.
+- `engine/config.toml` is stale and should not be treated as authoritative runtime configuration.
+- Rescue hedging/state-machine/treasury modules are present but not wired into the primary execution flow.
+- `cargo test` currently includes stale tests/fixtures from older event ID and drift assumptions, even though `cargo check` passes.
+- The FanDuel balance adapter scrapes the visible page and chooses the largest dollar-looking value, which is fragile.
+- The bet placer keepalive reload can interfere with active browser state.
+- Cookie saving assumes the `data/cookies` directory exists.
