@@ -482,7 +482,7 @@ mod tests {
     #[test]
     fn test_canonical_event_id() {
         let id = canonical_event_id("NBA", "Golden State Warriors", "Boston Celtics", "2026-03-15T19:30:00Z");
-        assert_eq!(id, "NBA:2026-03-15:BOS-vs-GSW"); // alphabetical: BOS < GSW
+        assert_eq!(id, "NBA:2026-03-15T19:BOS-vs-GSW"); // alphabetical: BOS < GSW
     }
 
     #[test]

@@ -1,7 +1,11 @@
 mod models;
 mod config;
 mod db;
+mod attempt_telemetry;
+mod execution_math;
+mod naked_legs;
 mod odds_fetcher;
+mod pin_yank;
 mod arb_detector;
 mod stake_optimizer;
 mod paper_executor;
@@ -15,6 +19,7 @@ mod odds_verifier;
 mod rescue_hedger;
 mod treasury;
 mod state_machine;
+mod status_classifier;
 mod policy;
 mod trades;
 
@@ -70,6 +75,8 @@ async fn main() {
         .ok().and_then(|v| v.parse().ok()).unwrap_or(24);
     let balance_refresh_cycles: u64 = std::env::var("BALANCE_REFRESH_CYCLES")
         .ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+    let naked_leg_monitor_cycles: u64 = std::env::var("NAKED_LEG_MONITOR_CYCLES")
+        .ok().and_then(|v| v.parse().ok()).filter(|v| *v > 0).unwrap_or(10);
     let skip_live: bool = std::env::var("SKIP_LIVE")
         .map(|v| v == "1" || v == "true").unwrap_or(false);
 
@@ -406,6 +413,20 @@ async fn main() {
                             let _ = poll_ws.send(models::WsEvent::BalanceUpdated { balances: db_balances });
                         }
                         Err(e) => tracing::warn!("[BALANCE REFRESH] failed: {}", e),
+                    }
+                }
+            }
+
+            // Periodic naked-leg monitor: persisted exposure survives restarts and
+            // gets retried for PIN relist/cashout resolution without adding a GUI.
+            if diff_cycle_count % naked_leg_monitor_cycles == 0 && diff_cycle_count > 0 {
+                if let Some((ref writer, ref reader)) = ws_conn {
+                    if let Err(e) = live_executor::monitor_naked_legs(
+                        writer,
+                        reader,
+                        settings.max_stake,
+                    ).await {
+                        tracing::warn!("[NAKED LEG MONITOR] failed: {}", e);
                     }
                 }
             }

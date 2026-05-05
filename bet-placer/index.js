@@ -95,10 +95,16 @@ async function main() {
 
       if (msg.type === "place_bet") {
         await handlePlaceBet(ws, msg);
+      } else if (msg.type === "validate_soft") {
+        await handleValidateSoft(ws, msg);
       } else if (msg.type === "quote_bet") {
         await handleQuoteBet(ws, msg);
       } else if (msg.type === "get_balances") {
         await handleGetBalances(ws);
+      } else if (msg.type === "get_bet_status") {
+        await handleGetBetStatus(ws, msg);
+      } else if (msg.type === "cashout") {
+        await handleCashOut(ws, msg);
       } else if (msg.type === "ping") {
         ws.send(JSON.stringify({ type: "pong" }));
       } else {
@@ -117,6 +123,72 @@ async function main() {
   });
 
   console.log(`\n[WS] Listening on ws://localhost:${WS_PORT}`);
+
+  function validDecimal(price) {
+    const n = Number(price);
+    return Number.isFinite(n) && n > 1 ? n : null;
+  }
+
+  async function handleValidateSoft(ws, cmd) {
+    const { attempt_id, venue, venue_market_id } = cmd;
+    const adapter = adapters[venue];
+    if (!adapter) {
+      ws.send(JSON.stringify({
+        type: "validate_soft_result",
+        attempt_id,
+        status: "error",
+        error_message: `Unknown venue: ${venue}`,
+      }));
+      return;
+    }
+
+    try {
+      let price = null;
+      let displayOdds = null;
+
+      if (venue === "draftkings") {
+        if (typeof adapter.calculateBets !== "function") {
+          throw new Error("draftkings adapter does not support calculateBets");
+        }
+        const { data } = await adapter.calculateBets([venue_market_id]);
+        const selection = data.selections?.[0];
+        price = validDecimal(selection?.trueOdds);
+        displayOdds = selection?.displayOdds ?? null;
+      } else if (venue === "fanduel") {
+        if (typeof adapter.getSelectionInfo !== "function") {
+          throw new Error("fanduel adapter does not support getSelectionInfo");
+        }
+        const info = await adapter.getSelectionInfo(venue_market_id);
+        const selection = info.selections?.[0];
+        price = validDecimal(
+          selection?.trueOdds ??
+          selection?.displayOdds?.decimal ??
+          selection?.displayOdds
+        );
+        displayOdds = selection?.displayOdds ?? null;
+      } else {
+        throw new Error(`validate_soft not implemented for venue: ${venue}`);
+      }
+
+      if (!price) throw new Error("validate_soft returned no executable price");
+
+      ws.send(JSON.stringify({
+        type: "validate_soft_result",
+        attempt_id,
+        status: "ok",
+        price,
+        display_odds: displayOdds,
+      }));
+    } catch (err) {
+      ws.send(JSON.stringify({
+        type: "validate_soft_result",
+        attempt_id,
+        status: "error",
+        error_message: err.message,
+        error_code: err.code || null,
+      }));
+    }
+  }
 
   // ── Handle quote_bet request (Pinnacle only) ──
   async function handleQuoteBet(ws, cmd) {
@@ -224,6 +296,21 @@ async function main() {
         accepted_stake: stake,
         accepted_odds: acceptedOdds,
         error_message: null,
+        purchase_id:
+          result?._purchaseId ||
+          result?.purchaseId ||
+          result?.id ||
+          bet?.purchaseId ||
+          bet?.purchase_id ||
+          null,
+        bet_id:
+          result?._betId ||
+          result?.betId ||
+          result?.bets?.[0]?.betId ||
+          bet?.betId ||
+          bet?.id ||
+          bet?.receiptId ||
+          null,
       };
 
       console.log(`[BET] ${attempt_id} FILLED | ${venue} | $${stake} @ ${acceptedOdds.toFixed(3)}`);
@@ -259,6 +346,91 @@ async function main() {
   // ═══════════════════════════════════════════════════════════════
   // CLI — manual commands for testing/monitoring
   // ═══════════════════════════════════════════════════════════════
+  async function handleGetBetStatus(ws, cmd) {
+    const { attempt_id, venue, purchase_id, bet_id } = cmd;
+    const adapter = adapters[venue];
+    if (!adapter || typeof adapter.getBetStatus !== "function") {
+      ws.send(JSON.stringify({
+        type: "bet_status",
+        attempt_id,
+        venue,
+        purchase_id: purchase_id || null,
+        bet_id: bet_id || null,
+        status: "unknown",
+        raw_status: null,
+        error: `${venue} adapter does not support getBetStatus`,
+      }));
+      return;
+    }
+
+    try {
+      const result = await adapter.getBetStatus(purchase_id, bet_id);
+      ws.send(JSON.stringify({
+        type: "bet_status",
+        attempt_id,
+        venue,
+        ...result,
+      }));
+    } catch (err) {
+      ws.send(JSON.stringify({
+        type: "bet_status",
+        attempt_id,
+        venue,
+        purchase_id: purchase_id || null,
+        bet_id: bet_id || null,
+        status: "unknown",
+        raw_status: null,
+        error: err.message,
+      }));
+    }
+  }
+
+  async function handleCashOut(ws, cmd) {
+    const { attempt_id, venue, purchase_id, bet_id, dk_bet_id, amount } = cmd;
+    const adapter = adapters[venue];
+    if (!adapter || typeof adapter.cashOut !== "function") {
+      ws.send(JSON.stringify({
+        type: "cashout_result",
+        attempt_id,
+        venue,
+        bet_id: bet_id || null,
+        success: false,
+        error: `${venue} doesn't support cashout`,
+      }));
+      return;
+    }
+
+    try {
+      const purchaseOrBetId = purchase_id || bet_id;
+      const result = await adapter.cashOut(purchaseOrBetId, amount, dk_bet_id || null);
+      ws.send(JSON.stringify({
+        type: "cashout_result",
+        attempt_id,
+        venue,
+        bet_id: bet_id || null,
+        success: result?.success === true,
+        confirmed: result?.confirmed === true,
+        unconfirmed: result?.unconfirmed === true,
+        submitted: result?.submitted === true,
+        terminal_non_cashout: result?.terminal_non_cashout === true,
+        payout: result?.payout ?? null,
+        payout_claimed: result?.payout_claimed ?? null,
+        raw_status: result?.raw_status || null,
+        reason: result?.reason || null,
+        error: result?.error || null,
+      }));
+    } catch (err) {
+      ws.send(JSON.stringify({
+        type: "cashout_result",
+        attempt_id,
+        venue,
+        bet_id: bet_id || null,
+        success: false,
+        error: err.message,
+      }));
+    }
+  }
+
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   const ask = (q) => new Promise((resolve) => rl.question(q, resolve));
 

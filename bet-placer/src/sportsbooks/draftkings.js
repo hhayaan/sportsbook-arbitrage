@@ -23,6 +23,41 @@ const WAGER_HEADERS = {
   "x-client-widget-version": "2608.3.1",
 };
 
+const DK_RAW_STATUS_OPEN_RE =
+  /\bunsettled\b|\bnot\s+settled\b|\bopen\b|\bpending\b|\bplaced\b|\baccepted\b|\bprocessing\b|\blive\s*delay\b|\blivedelay\b|\bactive\b/i;
+const DK_RAW_STATUS_LIVE_PENDING_RE =
+  /\bpending\b|\bprocessing\b|\blive\s*delay\b|\blivedelay\b/i;
+const DK_RAW_STATUS_CASHED_OUT_RE =
+  /\bcashed\s*out\b|\bcashedout\b|\bcash\s*out\b/i;
+const DK_RAW_STATUS_VOIDED_RE =
+  /\bvoid(?:ed)?\b|\bcancell?ed\b|\bcancelled\b|\bcancel\b|\brefund(?:ed)?\b|\bpush\b/i;
+const DK_RAW_STATUS_SETTLED_RE =
+  /\bsettled\b|\bclosed\b|\bcomplete(?:d)?\b|\bresulted\b|\bpaid\b|\bgraded\b|\bwon\b|\bwin\b|\bwinner\b|\blost\b|\bloss\b|\bloser\b/i;
+
+function classifyDraftKingsRawStatus(rawStatus) {
+  const raw = String(rawStatus ?? "").trim();
+  if (!raw) return "unknown";
+  if (DK_RAW_STATUS_OPEN_RE.test(raw)) {
+    return DK_RAW_STATUS_LIVE_PENDING_RE.test(raw) ? "live_pending" : "open";
+  }
+  if (DK_RAW_STATUS_CASHED_OUT_RE.test(raw)) return "cashed_out";
+  if (DK_RAW_STATUS_VOIDED_RE.test(raw)) return "voided";
+  if (DK_RAW_STATUS_SETTLED_RE.test(raw)) return "settled";
+  return "unknown";
+}
+
+function parseMoneyAmount(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const n = Number(String(value).replace(/[^0-9.-]/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
+function safeBetIdFromPurchaseId(purchaseId) {
+  const n = Number(purchaseId);
+  return Number.isSafeInteger(n) ? String(n + 1) : null;
+}
+
 class DraftKingsAdapter {
   /**
    * @param {import('../browser-manager').BrowserManager} browserManager
@@ -263,6 +298,185 @@ class DraftKingsAdapter {
 
     console.log(`[DK] Bet result: ${placeResult.status}`);
     return placeResult;
+  }
+
+  _extractCashoutOffer(purchase) {
+    return parseMoneyAmount(
+      purchase?.cashOutValue ??
+      purchase?.cashoutValue ??
+      purchase?.cashOutAmount
+    );
+  }
+
+  async _getBetStatusByPurchaseId(purchaseId) {
+    const url =
+      `${HOSTS.gaming}/api/wager/v1/getPurchases` +
+      `?PurchaseIds=${encodeURIComponent(purchaseId)}&format=json`;
+    const resp = await this._apiRequest(url);
+    if (resp.status !== 200) {
+      return {
+        status: "unknown",
+        purchase_id: String(purchaseId),
+        bet_id: null,
+        raw_status: null,
+        found: false,
+        source: "getPurchases",
+        error: `getPurchases failed (${resp.status})`,
+      };
+    }
+
+    const data = resp.json();
+    const purchase = data?.purchases?.[0] || data?.purchase || (Array.isArray(data) ? data[0] : null);
+    if (!purchase) {
+      return {
+        status: "unknown",
+        purchase_id: String(purchaseId),
+        bet_id: null,
+        raw_status: null,
+        found: false,
+        source: "getPurchases",
+        error: "purchase_not_found",
+      };
+    }
+
+    const rawStatus = purchase.status || purchase.purchaseStatus || purchase.betStatus || null;
+    const status = classifyDraftKingsRawStatus(rawStatus);
+    const cashoutOffer = this._extractCashoutOffer(purchase);
+    return {
+      status,
+      purchase_id: String(purchase.purchaseId || purchase.id || purchaseId),
+      bet_id: String(purchase.betId || purchase.bets?.[0]?.betId || safeBetIdFromPurchaseId(purchaseId) || ""),
+      raw_status: rawStatus,
+      found: true,
+      source: "getPurchases",
+      cashout_available: cashoutOffer !== null && cashoutOffer > 0,
+      cashout_offer: cashoutOffer,
+    };
+  }
+
+  async getBetStatus(purchaseId, betId = null) {
+    const ids = [...new Set([purchaseId, betId].filter(Boolean).map((id) => String(id)))];
+    if (ids.length === 0) {
+      return {
+        status: "unknown",
+        purchase_id: null,
+        bet_id: null,
+        raw_status: null,
+        found: false,
+        source: "getPurchases",
+        error: "missing_purchase_id",
+      };
+    }
+
+    let last = null;
+    for (const id of ids) {
+      last = await this._getBetStatusByPurchaseId(id);
+      if (last.found || last.status !== "unknown") return last;
+    }
+    return last;
+  }
+
+  async cashOut(purchaseId, cashoutValue = null, betId = null) {
+    if (!purchaseId) throw new Error("cashOut requires purchaseId");
+
+    if (!cashoutValue) {
+      const status = await this._getBetStatusByPurchaseId(purchaseId);
+      cashoutValue = status.cashout_offer;
+      betId = betId || status.bet_id;
+      if (!cashoutValue) {
+        throw new Error(`No cashout offer available for ${purchaseId}`);
+      }
+    }
+
+    if (!betId) betId = safeBetIdFromPurchaseId(purchaseId) || String(purchaseId);
+
+    const url = `${HOSTS.gaming}/api/wager/v1/cashout`;
+    const body = {
+      cashOutInformation: {
+        betId: String(betId),
+        purchaseId: String(purchaseId),
+        cashOutEnabled: true,
+        partialCashOutEnabled: false,
+        fullReturn: cashoutValue,
+        cashOutStatus: "Confirm",
+      },
+      cashOutAmount: cashoutValue,
+    };
+
+    const resp = await this._apiRequest(url, { method: "POST", body });
+    if (resp.status !== 200) {
+      throw new Error(`cashout failed (${resp.status}): ${resp.body}`);
+    }
+
+    const data = resp.json();
+    const responseRawStatus = data?.status || null;
+    const responseStatusClass = classifyDraftKingsRawStatus(responseRawStatus);
+    if (responseStatusClass === "cashed_out") {
+      return {
+        success: true,
+        confirmed: true,
+        payout: cashoutValue,
+        raw_status: responseRawStatus,
+        raw: data,
+      };
+    }
+    if (responseStatusClass === "settled" || responseStatusClass === "voided") {
+      return {
+        success: false,
+        submitted: true,
+        terminal_non_cashout: true,
+        reason: "DK_CASHOUT_TERMINAL_NON_CASHOUT",
+        payout_claimed: cashoutValue,
+        raw_status: responseRawStatus,
+        raw: data,
+      };
+    }
+
+    if (data.status === "LiveDelay") {
+      const delaySeconds = Number.isFinite(Number(data.delayPeriod)) ? Math.max(0, Number(data.delayPeriod)) : 4;
+      await new Promise((resolve) => setTimeout(resolve, delaySeconds * 1000 + 1000));
+      const status = await this._getBetStatusByPurchaseId(purchaseId);
+      const statusClass = classifyDraftKingsRawStatus(status.raw_status);
+      if (statusClass === "cashed_out") {
+        return {
+          success: true,
+          confirmed: true,
+          payout: cashoutValue,
+          raw_status: status.raw_status,
+          raw: status,
+        };
+      }
+      if (statusClass === "settled" || statusClass === "voided") {
+        return {
+          success: false,
+          submitted: true,
+          terminal_non_cashout: true,
+          reason: "DK_CASHOUT_TERMINAL_NON_CASHOUT",
+          payout_claimed: cashoutValue,
+          raw_status: status.raw_status,
+          raw: status,
+        };
+      }
+      return {
+        success: false,
+        unconfirmed: true,
+        submitted: true,
+        reason: "DK_CASHOUT_NOT_CONFIRMED",
+        payout_claimed: cashoutValue,
+        raw_status: status.raw_status,
+        raw: status,
+      };
+    }
+
+    return {
+      success: false,
+      unconfirmed: true,
+      submitted: true,
+      reason: "DK_CASHOUT_NOT_CONFIRMED",
+      payout_claimed: cashoutValue,
+      raw_status: responseRawStatus,
+      raw: data,
+    };
   }
 
   /**

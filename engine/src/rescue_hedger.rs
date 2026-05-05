@@ -14,7 +14,7 @@ pub struct RescuePlan {
 /// Finds best available odds for the complementary selection on ANY venue,
 /// then calculates the rescue stake to minimize worst-case loss.
 ///
-/// rescue_stake = leg1_stake * (leg1_odds - 1) / (rescue_odds - 1)
+/// rescue_stake = leg1_stake * leg1_odds / rescue_odds
 pub fn compute_rescue(
     book: &Book,
     identity_key: &MarketIdentityKey,
@@ -40,13 +40,15 @@ pub fn compute_rescue(
         return None;
     }
 
-    let leg1_profit_if_wins = leg1_accepted_stake * (leg1_accepted_odds - 1.0);
-    let rescue_stake = leg1_profit_if_wins / (best_odds - 1.0);
+    let leg1_payout = leg1_accepted_stake * leg1_accepted_odds;
+    let rescue_stake = leg1_payout / best_odds;
     let rescue_stake = (rescue_stake * 100.0).round() / 100.0;
 
-    let loss_if_leg1_wins = rescue_stake - leg1_profit_if_wins;
-    let loss_if_leg2_wins = leg1_accepted_stake - rescue_stake * (best_odds - 1.0);
-    let worst_case_loss = loss_if_leg1_wins.max(loss_if_leg2_wins);
+    let total_stake = leg1_accepted_stake + rescue_stake;
+    let leg1_outcome_pnl = leg1_payout - total_stake;
+    let leg2_outcome_pnl = rescue_stake * best_odds - total_stake;
+    let guaranteed_pnl = leg1_outcome_pnl.min(leg2_outcome_pnl);
+    let worst_case_loss = (-guaranteed_pnl).max(0.0);
 
     if worst_case_loss > max_rescue_loss {
         return None;
@@ -81,6 +83,8 @@ mod tests {
             line: None,
             period: "full_game".into(),
             is_live: false,
+            player_name: None,
+            prop_type: None,
             decimal_odds: odds,
             american_odds: Some(0.0),
             venue: venue.into(),
@@ -104,8 +108,8 @@ mod tests {
         let p = plan.unwrap();
         assert_eq!(p.venue, "fanduel");
         assert!((p.odds - 2.5).abs() < 0.001);
-        assert!((p.stake - 53.33).abs() < 0.01);
-        assert!(p.worst_case_loss < 50.0);
+        assert!((p.stake - 72.00).abs() < 0.01);
+        assert!((p.worst_case_loss - 0.0).abs() < 0.01);
     }
 
     #[test]
