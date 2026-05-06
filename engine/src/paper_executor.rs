@@ -16,20 +16,23 @@ pub fn try_execute(
     let leg1_balance = db.get_balance(&candidate.leg1_venue)?;
     let leg2_balance = db.get_balance(&candidate.leg2_venue)?;
 
-    let requested_capital = match settings.stake_mode.as_str() {
-        "proportional" => {
-            let smaller = leg1_balance.min(leg2_balance);
-            (smaller * settings.proportional_pct / 100.0).min(settings.max_stake * 2.0)
-        }
-        _ => settings.fixed_stake * 2.0,
-    };
+    let requested_capital = stake_optimizer::requested_capital_with_soft_cap(
+        candidate,
+        settings,
+        leg1_balance,
+        leg2_balance,
+    );
 
     if requested_capital <= 0.0 {
         return None;
     }
 
     let (plan, _effective_capital, _was_scaled) = stake_optimizer::compute_stakes_with_balances(
-        candidate, requested_capital, leg1_balance, leg2_balance, settings.max_stake
+        candidate,
+        requested_capital,
+        leg1_balance,
+        leg2_balance,
+        settings.max_stake,
     )?;
 
     // Deduct balances

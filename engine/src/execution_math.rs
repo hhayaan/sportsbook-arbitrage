@@ -54,14 +54,14 @@ pub fn compute_pin_hedge_from_soft_fill(
         return None;
     }
 
-    let raw_pin_stake = soft_filled_stake * soft_filled_odds / pin_quote.price;
+    let soft_payout = soft_filled_stake * soft_filled_odds;
+    let raw_pin_stake = soft_payout / pin_quote.price;
     let pin_stake =
         clamp_stake_to_quote_bounds(raw_pin_stake, pin_quote.min_stake, pin_quote.max_stake);
-    if pin_stake <= 0.0 {
+    if pin_stake <= 0.0 || pin_stake > soft_payout {
         return None;
     }
 
-    let soft_payout = soft_filled_stake * soft_filled_odds;
     let pin_payout = pin_stake * pin_quote.price;
     let total_stake = soft_filled_stake + pin_stake;
     let guaranteed_profit = soft_payout.min(pin_payout) - total_stake;
@@ -110,6 +110,14 @@ mod tests {
 
         assert_eq!(hedge.pin_stake, 50.0);
         assert!(hedge.guaranteed_profit < 0.0);
+    }
+
+    #[test]
+    fn rejects_hedge_larger_than_soft_gross_payout() {
+        let quote = AuthenticatedQuote::new(2.50, 25.0, 999.0).unwrap();
+        let hedge = compute_pin_hedge_from_soft_fill(5.0, 4.00, quote);
+
+        assert!(hedge.is_none());
     }
 
     #[test]

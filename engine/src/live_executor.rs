@@ -21,7 +21,8 @@ pub type WsWriter =
 pub type WsReader =
     Arc<Mutex<SplitStream<tokio_tungstenite::WebSocketStream<MaybeTlsStream<TcpStream>>>>>;
 
-const FILL_TIMEOUT_MS: u64 = 20000;
+const DEFAULT_FILL_TIMEOUT_MS: u64 = 20000;
+const DEFAULT_PIN_FILL_TIMEOUT_MS: u64 = 45000;
 
 #[derive(Serialize)]
 struct PlaceBetCommand {
@@ -153,6 +154,14 @@ fn env_u64(name: &str, default: u64) -> u64 {
 
 fn env_optional_f64(name: &str) -> Option<f64> {
     std::env::var(name).ok().and_then(|v| v.parse().ok())
+}
+
+fn fill_timeout_ms(venue: &str) -> u64 {
+    if venue == "pinnacle" {
+        env_u64("PIN_FILL_TIMEOUT_MS", DEFAULT_PIN_FILL_TIMEOUT_MS)
+    } else {
+        env_u64("FILL_TIMEOUT_MS", DEFAULT_FILL_TIMEOUT_MS)
+    }
 }
 
 fn now_iso() -> String {
@@ -486,12 +495,13 @@ async fn place_leg(
 
     send_json(writer, payload).await?;
 
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(FILL_TIMEOUT_MS);
+    let timeout_ms = fill_timeout_ms(venue);
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
 
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            return Err(format!("fill timeout after {}ms", FILL_TIMEOUT_MS));
+            return Err(format!("fill timeout after {}ms", timeout_ms));
         }
 
         let msg = {
@@ -501,7 +511,7 @@ async fn place_leg(
                 Ok(Some(Ok(_))) => continue,
                 Ok(Some(Err(e))) => return Err(format!("WS read error: {}", e)),
                 Ok(None) => return Err("WS connection closed".to_string()),
-                Err(_) => return Err(format!("fill timeout after {}ms", FILL_TIMEOUT_MS)),
+                Err(_) => return Err(format!("fill timeout after {}ms", timeout_ms)),
             }
         };
 
@@ -689,7 +699,7 @@ async fn attempt_recovery(
     db: &Arc<Db>,
     attempt_id: &str,
     candidate: &ArbCandidate,
-    settings: &Settings,
+    _settings: &Settings,
     leg1_venue: &str,
     leg1_market_id: &str,
     leg1_selection: &str,
@@ -824,14 +834,15 @@ async fn attempt_recovery(
                 continue;
             };
 
-            if hedge.pin_stake > settings.max_stake {
+            let pin_balance = db.get_balance("pinnacle").unwrap_or(0.0);
+            if hedge.pin_stake > pin_balance {
                 emit_attempt(
-                    "RESCUE_STAKE_ABOVE_MAX",
+                    "RESCUE_PIN_BALANCE_INSUFFICIENT",
                     attempt_id,
                     json!({
                         "market": try_id,
                         "stake": hedge.pin_stake,
-                        "max_stake": settings.max_stake,
+                        "pin_balance": pin_balance,
                     }),
                 );
                 continue;
@@ -1033,7 +1044,7 @@ async fn attempt_recovery(
 pub async fn monitor_naked_legs(
     writer: &WsWriter,
     reader: &WsReader,
-    max_stake: f64,
+    pin_balance: f64,
 ) -> Result<(), String> {
     let legs = naked_legs::load_naked_legs();
     if legs.is_empty() {
@@ -1120,7 +1131,7 @@ pub async fn monitor_naked_legs(
                             if let Some(hedge) =
                                 compute_pin_hedge_from_soft_fill(leg.stake, leg.odds, quote)
                             {
-                                if hedge.pin_stake <= max_stake {
+                                if hedge.pin_stake <= pin_balance {
                                     match place_leg(
                                         writer,
                                         reader,
@@ -1158,6 +1169,16 @@ pub async fn monitor_naked_legs(
                                             }
                                         }
                                     }
+                                } else {
+                                    emit_attempt(
+                                        "NAKED_LEG_PIN_BALANCE_INSUFFICIENT",
+                                        &leg.attempt_id,
+                                        json!({
+                                            "market": pin_id,
+                                            "stake": hedge.pin_stake,
+                                            "pin_balance": pin_balance,
+                                        }),
+                                    );
                                 }
                             }
                         }
@@ -1261,13 +1282,12 @@ pub async fn try_execute(
     let leg1_balance = db.get_balance(&candidate.leg1_venue)?;
     let leg2_balance = db.get_balance(&candidate.leg2_venue)?;
 
-    let requested_capital = match settings.stake_mode.as_str() {
-        "proportional" => {
-            let smaller = leg1_balance.min(leg2_balance);
-            (smaller * settings.proportional_pct / 100.0).min(settings.max_stake * 2.0)
-        }
-        _ => settings.fixed_stake * 2.0,
-    };
+    let requested_capital = stake_optimizer::requested_capital_with_soft_cap(
+        candidate,
+        settings,
+        leg1_balance,
+        leg2_balance,
+    );
 
     if requested_capital <= 0.0 {
         return None;
@@ -1283,7 +1303,7 @@ pub async fn try_execute(
 
     if was_scaled {
         tracing::info!(
-            "[SCALED] Capital ${:.2} -> ${:.2} (balance/max_stake constraint)",
+            "[SCALED] Capital ${:.2} -> ${:.2} (balance/soft max constraint)",
             requested_capital,
             effective_capital
         );
@@ -1354,6 +1374,11 @@ pub async fn try_execute(
             candidate.leg1_venue_market_id.clone(),
         )
     };
+    let (first_balance, second_balance) = if leg1_is_first {
+        (leg1_balance, leg2_balance)
+    } else {
+        (leg2_balance, leg1_balance)
+    };
 
     let has_pinnacle = first_venue == "pinnacle" || second_venue == "pinnacle";
     if has_pinnacle {
@@ -1414,16 +1439,21 @@ pub async fn try_execute(
                     return None;
                 }
 
-                if hedge.pin_stake > settings.max_stake {
+                let pin_balance = if first_venue == "pinnacle" {
+                    first_balance
+                } else {
+                    second_balance
+                };
+                if hedge.pin_stake > pin_balance {
                     tracing::info!(
-                        "[PIN QUOTE] PIN stake ${:.2} exceeds max_stake ${:.2}; skipping",
+                        "[PIN QUOTE] PIN stake ${:.2} exceeds balance ${:.2}; skipping",
                         hedge.pin_stake,
-                        settings.max_stake
+                        pin_balance
                     );
                     emit_attempt(
-                        "PIN_QUOTE_STAKE_ABOVE_MAX",
+                        "PIN_QUOTE_BALANCE_INSUFFICIENT",
                         &attempt_id,
-                        json!({ "pin_stake": hedge.pin_stake, "max_stake": settings.max_stake }),
+                        json!({ "pin_stake": hedge.pin_stake, "pin_balance": pin_balance }),
                     );
                     return None;
                 }
@@ -1512,11 +1542,11 @@ pub async fn try_execute(
                             );
                             return None;
                         }
-                        if hedge.pin_stake > settings.max_stake {
+                        if hedge.pin_stake > second_balance {
                             emit_attempt(
-                                "SOFT_VALIDATED_PIN_STAKE_ABOVE_MAX",
+                                "SOFT_VALIDATED_PIN_BALANCE_INSUFFICIENT",
                                 &attempt_id,
-                                json!({ "pin_stake": hedge.pin_stake, "max_stake": settings.max_stake }),
+                                json!({ "pin_stake": hedge.pin_stake, "pin_balance": second_balance }),
                             );
                             return None;
                         }
@@ -1546,11 +1576,11 @@ pub async fn try_execute(
             PinPrefireDecision::Passed(quote) => {
                 if let Some(hedge) = compute_pin_hedge_from_soft_fill(first_stake, first_odds, quote)
                 {
-                    if hedge.pin_stake > settings.max_stake {
+                    if hedge.pin_stake > second_balance {
                         emit_attempt(
-                            "PIN_PREFIRE_STAKE_ABOVE_MAX",
+                            "PIN_PREFIRE_BALANCE_INSUFFICIENT",
                             &attempt_id,
-                            json!({ "pin_stake": hedge.pin_stake, "max_stake": settings.max_stake }),
+                            json!({ "pin_stake": hedge.pin_stake, "pin_balance": second_balance }),
                         );
                         return None;
                     }
@@ -1686,10 +1716,10 @@ pub async fn try_execute(
                 }
             };
 
-            if hedge.pin_stake > settings.max_stake {
+            if hedge.pin_stake > second_balance {
                 let reason = format!(
-                    "post_fill_pin_stake_above_max stake={:.2} max={:.2}",
-                    hedge.pin_stake, settings.max_stake
+                    "post_fill_pin_balance_insufficient stake={:.2} balance={:.2}",
+                    hedge.pin_stake, second_balance
                 );
                 tracing::warn!("[POST-FILL] {}", reason);
                 attempt_recovery(

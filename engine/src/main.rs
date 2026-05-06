@@ -421,10 +421,11 @@ async fn main() {
             // gets retried for PIN relist/cashout resolution without adding a GUI.
             if diff_cycle_count % naked_leg_monitor_cycles == 0 && diff_cycle_count > 0 {
                 if let Some((ref writer, ref reader)) = ws_conn {
+                    let pin_balance = poll_db.get_balance("pinnacle").unwrap_or(0.0);
                     if let Err(e) = live_executor::monitor_naked_legs(
                         writer,
                         reader,
-                        settings.max_stake,
+                        pin_balance,
                     ).await {
                         tracing::warn!("[NAKED LEG MONITOR] failed: {}", e);
                     }

@@ -1,4 +1,4 @@
-use crate::models::{ArbCandidate, StakePlan};
+use crate::models::{ArbCandidate, Settings, StakePlan};
 
 /// Minimum capital to bother trading (both legs combined)
 pub const MIN_CAPITAL: f64 = 1.0;
@@ -7,6 +7,42 @@ pub const MIN_PROFIT: f64 = 0.01;
 
 fn round_cents(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
+}
+
+pub fn requested_capital_with_soft_cap(
+    candidate: &ArbCandidate,
+    settings: &Settings,
+    leg1_balance: f64,
+    leg2_balance: f64,
+) -> f64 {
+    let target_stake = match settings.stake_mode.as_str() {
+        "proportional" => {
+            let soft_balance = if candidate.leg1_venue == "pinnacle" {
+                leg2_balance
+            } else if candidate.leg2_venue == "pinnacle" {
+                leg1_balance
+            } else {
+                leg1_balance.min(leg2_balance)
+            };
+            soft_balance * settings.proportional_pct / 100.0
+        }
+        _ => settings.fixed_stake,
+    }
+    .min(settings.max_stake);
+
+    if candidate.leg1_venue == "pinnacle" && candidate.leg2_venue != "pinnacle" {
+        target_stake * candidate.sigma * candidate.leg2_odds
+    } else if candidate.leg2_venue == "pinnacle" && candidate.leg1_venue != "pinnacle" {
+        target_stake * candidate.sigma * candidate.leg1_odds
+    } else {
+        match settings.stake_mode.as_str() {
+            "proportional" => {
+                let smaller = leg1_balance.min(leg2_balance);
+                (smaller * settings.proportional_pct / 100.0).min(settings.max_stake * 2.0)
+            }
+            _ => settings.fixed_stake * 2.0,
+        }
+    }
 }
 
 pub fn compute_stakes(candidate: &ArbCandidate, capital: f64) -> Option<StakePlan> {
@@ -33,14 +69,16 @@ pub fn compute_stakes(candidate: &ArbCandidate, capital: f64) -> Option<StakePla
 }
 
 /// Balance-aware stake scaling. Computes stakes from requested capital, then
-/// scales down if either leg exceeds available balance or max_stake_per_leg.
+/// scales down if either leg exceeds available balance or the soft-book stake cap.
+/// Pinnacle hedge legs are not capped here; they are bounded later by the
+/// authenticated quote, Pinnacle balance, and post-fill profitability checks.
 /// Returns (StakePlan, effective_capital, was_scaled).
 pub fn compute_stakes_with_balances(
     candidate: &ArbCandidate,
     requested_capital: f64,
     leg1_balance: f64,
     leg2_balance: f64,
-    max_stake_per_leg: f64,
+    max_soft_stake: f64,
 ) -> Option<(StakePlan, f64, bool)> {
     if candidate.sigma >= 1.0 || requested_capital <= 0.0 {
         return None;
@@ -70,16 +108,20 @@ pub fn compute_stakes_with_balances(
         }
     }
 
-    // Cap by max_stake_per_leg
-    let max_cap_1 = max_stake_per_leg * candidate.sigma * candidate.leg1_odds;
-    let max_cap_2 = max_stake_per_leg * candidate.sigma * candidate.leg2_odds;
-    if max_cap_1 < effective_capital {
-        effective_capital = max_cap_1;
-        scaled = true;
+    // Cap soft-book legs only. Pinnacle hedge sizing is quote/balance bounded.
+    if candidate.leg1_venue != "pinnacle" {
+        let max_cap_1 = max_soft_stake * candidate.sigma * candidate.leg1_odds;
+        if max_cap_1 < effective_capital {
+            effective_capital = max_cap_1;
+            scaled = true;
+        }
     }
-    if max_cap_2 < effective_capital {
-        effective_capital = max_cap_2;
-        scaled = true;
+    if candidate.leg2_venue != "pinnacle" {
+        let max_cap_2 = max_soft_stake * candidate.sigma * candidate.leg2_odds;
+        if max_cap_2 < effective_capital {
+            effective_capital = max_cap_2;
+            scaled = true;
+        }
     }
 
     if effective_capital < MIN_CAPITAL {
@@ -107,4 +149,71 @@ pub fn compute_stakes_with_balances(
         round_cents(effective_capital),
         scaled,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(
+        leg1_venue: &str,
+        leg1_odds: f64,
+        leg2_venue: &str,
+        leg2_odds: f64,
+    ) -> ArbCandidate {
+        let sigma = 1.0 / leg1_odds + 1.0 / leg2_odds;
+        ArbCandidate {
+            event_id: "test-event".to_string(),
+            sport: "MLB".to_string(),
+            market_type: "moneyline".to_string(),
+            period: "full_game".to_string(),
+            start_time_utc: "2026-05-06T00:00:00Z".to_string(),
+            leg1_venue: leg1_venue.to_string(),
+            leg1_selection: "A".to_string(),
+            leg1_odds,
+            leg1_received_at_ms: 0,
+            leg1_venue_market_id: "leg1".to_string(),
+            leg2_venue: leg2_venue.to_string(),
+            leg2_selection: "B".to_string(),
+            leg2_odds,
+            leg2_received_at_ms: 0,
+            leg2_venue_market_id: "leg2".to_string(),
+            sigma,
+            arb_pct: 1.0 - sigma,
+            roi: 0.0,
+            line: None,
+            is_live: false,
+        }
+    }
+
+    fn settings(fixed_stake: f64, max_stake: f64) -> Settings {
+        Settings {
+            fixed_stake,
+            max_stake,
+            ..Settings::default()
+        }
+    }
+
+    #[test]
+    fn soft_cap_does_not_cap_pinnacle_hedge() {
+        let c = candidate("draftkings", 6.0, "pinnacle", 1.35);
+        let requested = requested_capital_with_soft_cap(&c, &settings(5.0, 5.0), 1000.0, 1000.0);
+        let (plan, _, scaled) =
+            compute_stakes_with_balances(&c, requested, 1000.0, 1000.0, 5.0).unwrap();
+
+        assert!(!scaled);
+        assert_eq!(plan.leg1_stake, 5.0);
+        assert!(plan.leg2_stake > 10.0);
+    }
+
+    #[test]
+    fn soft_cap_still_caps_non_pinnacle_pair() {
+        let c = candidate("draftkings", 2.2, "fanduel", 2.2);
+        let (plan, _, scaled) =
+            compute_stakes_with_balances(&c, 40.0, 1000.0, 1000.0, 5.0).unwrap();
+
+        assert!(scaled);
+        assert!(plan.leg1_stake <= 5.0);
+        assert!(plan.leg2_stake <= 5.0);
+    }
 }
