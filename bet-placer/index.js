@@ -3,6 +3,7 @@
 // Patchright browser automation for live bet placement
 // ═══════════════════════════════════════════════════════════════════
 const readline = require("readline");
+const http = require("http");
 const { WebSocketServer } = require("ws");
 const { BrowserManager } = require("./src/browser-manager");
 const { SPORTSBOOKS } = require("./src/sportsbooks");
@@ -11,6 +12,7 @@ const { FanDuelAdapter } = require("./src/sportsbooks/fanduel");
 const { PinnacleAdapter } = require("./src/sportsbooks/pinnacle");
 
 const WS_PORT = parseInt(process.env.WS_PORT || "3402", 10);
+const PIN_ODDS_PORT = parseInt(process.env.PIN_ODDS_PORT || "3404", 10);
 const KEEPALIVE_INTERVAL_MS = 5 * 60 * 1000;
 
 async function main() {
@@ -77,6 +79,51 @@ async function main() {
   // ═══════════════════════════════════════════════════════════════
   // WebSocket Server — receives commands from Rust engine
   // ═══════════════════════════════════════════════════════════════
+  const pinOddsServer = http.createServer(async (req, res) => {
+    const sendJson = (status, payload) => {
+      res.writeHead(status, {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      });
+      res.end(JSON.stringify(payload));
+    };
+
+    try {
+      const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+      if (req.method === "GET" && url.pathname === "/health") {
+        sendJson(200, { status: "ok" });
+        return;
+      }
+
+      const match = url.pathname.match(/^\/pinnacle\/snapshot\/(\d+)$/);
+      if (req.method !== "GET" || !match) {
+        sendJson(404, { status: "error", error: "not found" });
+        return;
+      }
+
+      const adapter = adapters.pinnacle;
+      if (!adapter || typeof adapter.getLeagueSnapshot !== "function") {
+        sendJson(503, { status: "error", error: "pinnacle adapter unavailable" });
+        return;
+      }
+
+      const leagueId = Number.parseInt(match[1], 10);
+      const snapshot = await adapter.getLeagueSnapshot(leagueId);
+      sendJson(200, {
+        status: "ok",
+        league_id: leagueId,
+        matchups: snapshot.matchups,
+        markets: snapshot.markets,
+      });
+    } catch (err) {
+      sendJson(500, { status: "error", error: err.message });
+    }
+  });
+
+  pinOddsServer.listen(PIN_ODDS_PORT, () => {
+    console.log(`[PIN-ODDS] Listening on http://localhost:${PIN_ODDS_PORT}`);
+  });
+
   const wss = new WebSocketServer({ port: WS_PORT });
   let engineSocket = null;
 
@@ -513,6 +560,7 @@ async function main() {
   }
 
   clearInterval(keepaliveTimer);
+  pinOddsServer.close();
   wss.close();
   for (const [, adapter] of Object.entries(adapters)) {
     await adapter.saveCookies();

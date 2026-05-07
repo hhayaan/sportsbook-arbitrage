@@ -1,45 +1,46 @@
-mod models;
+mod api;
+mod arb_detector;
+mod attempt_telemetry;
+mod circuit_breaker;
 mod config;
 mod db;
-mod attempt_telemetry;
 mod execution_math;
+mod live_executor;
+mod models;
 mod naked_legs;
 mod odds_fetcher;
-mod pin_yank;
-mod arb_detector;
-mod stake_optimizer;
-mod paper_executor;
-mod live_executor;
-mod ws;
-mod api;
-mod team_names;
-mod circuit_breaker;
-mod rate_limiter;
 mod odds_verifier;
+mod paper_executor;
+mod pin_yank;
+mod policy;
+mod rate_limiter;
 mod rescue_hedger;
-mod treasury;
+mod stake_optimizer;
 mod state_machine;
 mod status_classifier;
-mod policy;
+mod team_names;
 mod trades;
+mod treasury;
+mod ws;
 
 use api::AppState;
-use axum::{routing::{get, post}, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use std::sync::Arc;
 use std::time::Duration;
-use tower_http::cors::{CorsLayer, Any};
+use tower_http::cors::{Any, CorsLayer};
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
     let live_mode = std::env::var("LIVE_MODE").unwrap_or_default() == "1";
     if live_mode {
-        tracing::info!("=== Arb Engine V3 — LIVE TRADING ===");
+        tracing::info!("=== Arb Engine V6 — LIVE TRADING ===");
     } else {
-        tracing::info!("=== Arb Engine V3 — Paper Trading ===");
+        tracing::info!("=== Arb Engine V6 — Paper Trading ===");
     }
 
     // Init DB
@@ -50,42 +51,73 @@ async fn main() {
     let mut settings_overrides = db.get_settings();
     let mut any_override = false;
     if let Ok(v) = std::env::var("FIXED_STAKE") {
-        if let Ok(val) = v.parse::<f64>() { settings_overrides.fixed_stake = val; any_override = true; }
+        if let Ok(val) = v.parse::<f64>() {
+            settings_overrides.fixed_stake = val;
+            any_override = true;
+        }
     }
     if let Ok(v) = std::env::var("MAX_STAKE") {
-        if let Ok(val) = v.parse::<f64>() { settings_overrides.max_stake = val; any_override = true; }
+        if let Ok(val) = v.parse::<f64>() {
+            settings_overrides.max_stake = val;
+            any_override = true;
+        }
     }
     if let Ok(v) = std::env::var("MIN_ARB_PCT") {
-        if let Ok(val) = v.parse::<f64>() { settings_overrides.min_arb_pct = val; any_override = true; }
+        if let Ok(val) = v.parse::<f64>() {
+            settings_overrides.min_arb_pct = val;
+            any_override = true;
+        }
     }
     if let Ok(v) = std::env::var("STAKE_MODE") {
-        settings_overrides.stake_mode = v; any_override = true;
+        settings_overrides.stake_mode = v;
+        any_override = true;
     }
     if let Ok(v) = std::env::var("PROPORTIONAL_PCT") {
-        if let Ok(val) = v.parse::<f64>() { settings_overrides.proportional_pct = val; any_override = true; }
+        if let Ok(val) = v.parse::<f64>() {
+            settings_overrides.proportional_pct = val;
+            any_override = true;
+        }
     }
     if let Ok(v) = std::env::var("ENABLED") {
-        settings_overrides.enabled = v == "1" || v == "true"; any_override = true;
+        settings_overrides.enabled = v == "1" || v == "true";
+        any_override = true;
     }
     if any_override {
         db.update_settings(&settings_overrides);
     }
 
     let max_hours_to_start: i64 = std::env::var("MAX_HOURS_TO_START")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(24);
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(24);
     let balance_refresh_cycles: u64 = std::env::var("BALANCE_REFRESH_CYCLES")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
     let naked_leg_monitor_cycles: u64 = std::env::var("NAKED_LEG_MONITOR_CYCLES")
-        .ok().and_then(|v| v.parse().ok()).filter(|v| *v > 0).unwrap_or(10);
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(10);
     let skip_live: bool = std::env::var("SKIP_LIVE")
-        .map(|v| v == "1" || v == "true").unwrap_or(false);
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
+    let pin_odds_source = odds_fetcher::pinnacle_odds_source_name();
+    let pin_auth_odds_base_url = odds_fetcher::pinnacle_auth_odds_base_url();
+    let dk_proxy_base_url = odds_fetcher::draftkings_proxy_base_url();
 
     tracing::info!(
-        "Settings: enabled={} stake_mode={} fixed_stake=${:.2} max_stake=${:.2} min_arb_pct={:.1}% max_hours={} skip_live={}",
+        "Settings: enabled={} stake_mode={} fixed_stake=${:.2} max_stake=${:.2} min_arb_pct={:.1}% max_hours={} skip_live={} pin_odds_source={}",
         settings_overrides.enabled, settings_overrides.stake_mode,
         settings_overrides.fixed_stake, settings_overrides.max_stake, settings_overrides.min_arb_pct,
-        max_hours_to_start, skip_live
+        max_hours_to_start, skip_live, pin_odds_source
     );
+    tracing::info!("DraftKings proxy endpoint: {}", dk_proxy_base_url);
+    if pin_odds_source == "auth" {
+        tracing::info!("Pinnacle auth odds bridge: {}", pin_auth_odds_base_url);
+    } else {
+        tracing::info!("Pinnacle odds source: guest API");
+    }
 
     // Init WebSocket broadcaster
     let (ws_tx, _) = ws::create_broadcaster();
@@ -111,7 +143,8 @@ async fn main() {
     tokio::spawn(async move {
         // Connect to bet placer WebSocket if in live mode
         let ws_conn = if live_mode {
-            let ws_url = std::env::var("WS_URL").unwrap_or_else(|_| "ws://127.0.0.1:3402".to_string());
+            let ws_url =
+                std::env::var("WS_URL").unwrap_or_else(|_| "ws://127.0.0.1:3402".to_string());
             match live_executor::connect(&ws_url).await {
                 Ok((writer, reader)) => {
                     tracing::info!("WebSocket connected to bet placer at {}", ws_url);
@@ -124,7 +157,9 @@ async fn main() {
                                 tracing::info!("[BALANCE] {:<10} = ${:.2} (live)", venue, balance);
                             }
                             let db_balances = poll_db.get_balances();
-                            let _ = poll_ws.send(models::WsEvent::BalanceUpdated { balances: db_balances });
+                            let _ = poll_ws.send(models::WsEvent::BalanceUpdated {
+                                balances: db_balances,
+                            });
                         }
                         Err(e) => {
                             tracing::warn!("Could not fetch live balances: {}", e);
@@ -143,7 +178,8 @@ async fn main() {
         };
         let mut book = models::Book::new(config::MAX_DATA_AGE_MS);
         // Time-based dedup: maps trade_key → last trade timestamp
-        let mut traded_keys: std::collections::HashMap<String, std::time::Instant> = std::collections::HashMap::new();
+        let mut traded_keys: std::collections::HashMap<String, std::time::Instant> =
+            std::collections::HashMap::new();
         let dedup_cooldown = std::time::Duration::from_secs(60);
 
         // Safety modules
@@ -154,10 +190,12 @@ async fn main() {
             .map(|v| (v.to_string(), 200u32)) // 200 bets/hour for paper
             .collect();
         let mut rl = rate_limiter::RateLimiter::new(venue_limits, 60);
-        let mut last_venue_data: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        let mut last_venue_data: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
 
         // Diff-based book updates: only update entries where odds/line/live changed
-        let mut market_hashes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut market_hashes: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         let mut diff_cycle_count: u64 = 0;
 
         loop {
@@ -209,14 +247,20 @@ async fn main() {
                 }
             }
 
-            tracing::info!("Fetched {} markets ({}  changed, {} unchanged)", markets.len(), changed, unchanged);
+            tracing::info!(
+                "Fetched {} markets ({}  changed, {} unchanged)",
+                markets.len(),
+                changed,
+                unchanged
+            );
 
             book.expire(now_ms);
             rl.prune();
 
             // Log venue health
             for venue in config::VENUES {
-                let age = last_venue_data.get(*venue)
+                let age = last_venue_data
+                    .get(*venue)
                     .map(|t| now_ms.saturating_sub(*t))
                     .unwrap_or(u64::MAX);
                 let count = markets.iter().filter(|m| m.venue == *venue).count();
@@ -225,7 +269,8 @@ async fn main() {
                 }
             }
 
-            tracing::info!("Book: {} entries across {} identity keys",
+            tracing::info!(
+                "Book: {} entries across {} identity keys",
                 book.total_entries(),
                 book.identity_keys().len(),
             );
@@ -233,7 +278,12 @@ async fn main() {
             // Detect arbs
             // DK-FD arbs lost money — require Pinnacle on one side for production
             let require_pinnacle_leg = true;
-            let candidates = arb_detector::detect_arbs(&book, now_ms, config::MAX_DATA_AGE_MS, require_pinnacle_leg);
+            let candidates = arb_detector::detect_arbs(
+                &book,
+                now_ms,
+                config::MAX_DATA_AGE_MS,
+                require_pinnacle_leg,
+            );
 
             if !candidates.is_empty() {
                 tracing::info!("Detected {} arb candidates", candidates.len());
@@ -275,8 +325,10 @@ async fn main() {
                     candidate.arb_pct * 100.0,
                     candidate.sport,
                     candidate.market_type,
-                    leg1_venue_str, leg1_sel,
-                    leg2_sel, leg2_venue_str,
+                    leg1_venue_str,
+                    leg1_sel,
+                    leg2_sel,
+                    leg2_venue_str,
                     game,
                 );
 
@@ -290,11 +342,21 @@ async fn main() {
 
                 // Rate limiter
                 if let Err((count, max)) = rl.check(&candidate.leg1_venue) {
-                    tracing::warn!("[RATE LIMIT] {} at {}/{} bets/hour", candidate.leg1_venue, count, max);
+                    tracing::warn!(
+                        "[RATE LIMIT] {} at {}/{} bets/hour",
+                        candidate.leg1_venue,
+                        count,
+                        max
+                    );
                     continue;
                 }
                 if let Err((count, max)) = rl.check(&candidate.leg2_venue) {
-                    tracing::warn!("[RATE LIMIT] {} at {}/{} bets/hour", candidate.leg2_venue, count, max);
+                    tracing::warn!(
+                        "[RATE LIMIT] {} at {}/{} bets/hour",
+                        candidate.leg2_venue,
+                        count,
+                        max
+                    );
                     continue;
                 }
 
@@ -308,7 +370,9 @@ async fn main() {
                 if candidate.arb_pct > 0.15 {
                     tracing::warn!(
                         "[HIGH%] {:.1}% arb — possible mismatch: {} {}",
-                        candidate.arb_pct * 100.0, candidate.event_id, candidate.market_type
+                        candidate.arb_pct * 100.0,
+                        candidate.event_id,
+                        candidate.market_type
                     );
                 }
 
@@ -319,11 +383,18 @@ async fn main() {
 
                 // Time-to-start filter: skip events too far in the future (capital lockup)
                 if !candidate.is_live {
-                    if let Ok(start) = chrono::DateTime::parse_from_rfc3339(&candidate.start_time_utc) {
+                    if let Ok(start) =
+                        chrono::DateTime::parse_from_rfc3339(&candidate.start_time_utc)
+                    {
                         let now = chrono::Utc::now();
                         let hours_to_start = (start.timestamp() - now.timestamp()).max(0) / 3600;
                         if hours_to_start > max_hours_to_start {
-                            tracing::debug!("[TIME] {} {}h away, max={}h — skipping", candidate.event_id, hours_to_start, max_hours_to_start);
+                            tracing::debug!(
+                                "[TIME] {} {}h away, max={}h — skipping",
+                                candidate.event_id,
+                                hours_to_start,
+                                max_hours_to_start
+                            );
                             continue;
                         }
                     }
@@ -345,8 +416,10 @@ async fn main() {
 
                     let trade_key = format!(
                         "{}:{}:{}:{}",
-                        candidate_to_trade.event_id, candidate_to_trade.market_type,
-                        candidate_to_trade.leg1_venue, candidate_to_trade.leg2_venue
+                        candidate_to_trade.event_id,
+                        candidate_to_trade.market_type,
+                        candidate_to_trade.leg1_venue,
+                        candidate_to_trade.leg2_venue
                     );
 
                     // Time-based dedup: skip if traded within cooldown period
@@ -358,7 +431,14 @@ async fn main() {
                     if should_trade {
                         // Branch: live execution via WebSocket or paper execution
                         let trade_result = if let Some((ref writer, ref reader)) = ws_conn {
-                            live_executor::try_execute(writer, reader, &poll_db, &candidate_to_trade, &settings).await
+                            live_executor::try_execute(
+                                writer,
+                                reader,
+                                &poll_db,
+                                &candidate_to_trade,
+                                &settings,
+                            )
+                            .await
                         } else {
                             paper_executor::try_execute(&poll_db, &candidate_to_trade, &settings)
                         };
@@ -368,9 +448,13 @@ async fn main() {
                             tracing::info!(
                                 "[{}] ${:.2} profit on {} {} | {}@{:.3} + {}@{:.3}",
                                 mode_label,
-                                trade.theoretical_profit, trade.sport, trade.market_type,
-                                trade.leg1_selection, trade.leg1_odds,
-                                trade.leg2_selection, trade.leg2_odds,
+                                trade.theoretical_profit,
+                                trade.sport,
+                                trade.market_type,
+                                trade.leg1_selection,
+                                trade.leg1_odds,
+                                trade.leg2_selection,
+                                trade.leg2_odds,
                             );
                             poll_db.mark_arb_traded(&arb_id);
                             traded_keys.insert(trade_key, std::time::Instant::now());
@@ -410,7 +494,9 @@ async fn main() {
                             }
                             tracing::info!("[BALANCE REFRESH] synced {} venues", balances.len());
                             let db_balances = poll_db.get_balances();
-                            let _ = poll_ws.send(models::WsEvent::BalanceUpdated { balances: db_balances });
+                            let _ = poll_ws.send(models::WsEvent::BalanceUpdated {
+                                balances: db_balances,
+                            });
                         }
                         Err(e) => tracing::warn!("[BALANCE REFRESH] failed: {}", e),
                     }
@@ -422,11 +508,9 @@ async fn main() {
             if diff_cycle_count % naked_leg_monitor_cycles == 0 && diff_cycle_count > 0 {
                 if let Some((ref writer, ref reader)) = ws_conn {
                     let pin_balance = poll_db.get_balance("pinnacle").unwrap_or(0.0);
-                    if let Err(e) = live_executor::monitor_naked_legs(
-                        writer,
-                        reader,
-                        pin_balance,
-                    ).await {
+                    if let Err(e) =
+                        live_executor::monitor_naked_legs(writer, reader, pin_balance).await
+                    {
                         tracing::warn!("[NAKED LEG MONITOR] failed: {}", e);
                     }
                 }
@@ -450,7 +534,10 @@ async fn main() {
         .route("/api/trades", get(api::get_trades))
         .route("/api/arbs", get(api::get_arbs))
         .route("/api/stats", get(api::get_stats))
-        .route("/api/settings", get(api::get_settings).post(api::update_settings))
+        .route(
+            "/api/settings",
+            get(api::get_settings).post(api::update_settings),
+        )
         .route("/api/reset", post(api::full_reset))
         .route("/ws", get(api::ws_handler))
         .layer(cors)
@@ -458,6 +545,8 @@ async fn main() {
 
     let addr = "0.0.0.0:3401";
     tracing::info!("Listening on http://{}", addr);
-    let listener = tokio::net::TcpListener::bind(addr).await.expect("failed to bind");
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .expect("failed to bind");
     axum::serve(listener, app).await.expect("server failed");
 }

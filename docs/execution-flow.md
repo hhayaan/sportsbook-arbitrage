@@ -1,4 +1,4 @@
-# Execution Flow (V5 Current State)
+# Execution Flow (Current State)
 
 This document traces what happens from public odds polling through paper or live execution. It reflects the current Rust and Node implementation, not the older `config.toml` policy draft.
 
@@ -14,6 +14,7 @@ startup
   start dashboard broadcaster
   build reqwest client
   if LIVE_MODE=1, try WebSocket connection to bet placer
+  if PIN_ODDS_SOURCE is auth/default, Pinnacle scan expects bet placer HTTP on 3404
   start polling task
   start Axum REST/WebSocket server on 0.0.0.0:3401
 
@@ -38,7 +39,9 @@ Current source behavior:
 
 - DraftKings: Rust fetches through `http://localhost:3403/dk/{leagueId}` first. The proxy calls DraftKings with Node `fetch`. Rust falls back to the direct DraftKings URL if needed.
 - FanDuel: Rust calls Ontario FanDuel content-managed-page endpoints for public odds.
-- Pinnacle: Rust calls guest Arcadia endpoints for public odds.
+- Pinnacle: Rust defaults to authenticated odds. It calls `GET /pinnacle/snapshot/{leagueId}` on `PIN_AUTH_ODDS_BASE_URL` or `http://127.0.0.1:3404`; the bet placer then uses the single logged-in Pinnacle browser session to fetch Arcadia `matchups` and `markets/straight`.
+- Pinnacle guest scanning is still present but opt-in with `PIN_ODDS_SOURCE=guest` or `PIN_ODDS_SOURCE=public`.
+- All venue fetches use `ODDS_FETCH_TIMEOUT_MS`, default `2500`, so one slow or dead league should deadline out quickly instead of delaying arb detection for the old 15-second request timeout.
 
 All responses are converted into `CanonicalMarket` records with normalized event IDs, selections, period labels, line values, venue IDs, and timestamps.
 
@@ -112,13 +115,13 @@ The main loop applies these gates before calling the executor:
 10. Require `settings.enabled`.
 11. Call the paper or live executor, which enforces `settings.min_arb_pct` and stake sizing constraints.
 
-The dedup key is:
+The current first-wave dedup key is:
 
 ```text
-event_id | market_type | period | line | leg1_selection | leg2_selection
+event_id | market_type | leg1_venue | leg2_venue
 ```
 
-Because the detector's `selections` vector comes from a hash map, leg selection order can be implementation-dependent. The current dedup key works in practice for the observed flow, but it is not a fully canonical sorted pair key.
+This is intentionally still basic. Hunter-style family/ladder dedup is shelved for the next merge phase, so this key can still refire the same family after the 60-second cooldown if line or price churn produces repeated candidates.
 
 ## Stake Sizing
 
@@ -135,10 +138,20 @@ guaranteed_profit = guaranteed_payout - capital
 
 Stakes and results are rounded to cents.
 
-`compute_stakes_with_balances` scales capital down when a leg would exceed:
+`requested_capital_with_soft_cap` first chooses a target soft-book stake:
+
+- fixed mode starts from `settings.fixed_stake`;
+- proportional mode uses `settings.proportional_pct` of the soft-book balance, or the smaller balance for non-Pinnacle pairs;
+- the target soft-book stake is capped by `settings.max_stake`.
+
+For Pinnacle-backed arbs, `settings.max_stake` is a soft-book cap, not a Pinnacle hedge cap. The requested capital is derived so the non-Pinnacle leg lands near the requested soft stake.
+
+`compute_stakes_with_balances` then scales capital down when a leg would exceed:
 
 - the venue balance stored in SQLite, or
-- `settings.max_stake` per leg.
+- `settings.max_stake` on a non-Pinnacle soft-book leg.
+
+Pinnacle hedge legs are not capped by `MAX_STAKE` at this stage. They are bounded later by authenticated quote max stake, Pinnacle balance, and profitability checks.
 
 It skips plans below:
 
@@ -156,7 +169,7 @@ Settings defaults are seeded in SQLite:
 | `fixed_stake` | `25` |
 | `proportional_pct` | `5` |
 
-`stake_mode=fixed` requests `fixed_stake * 2` total capital. `stake_mode=proportional` requests a percentage of the smaller venue balance, capped by `max_stake * 2`.
+For non-Pinnacle pairs, fixed mode still requests `fixed_stake * 2` total capital and proportional mode is capped by `max_stake * 2`. The production live path currently requires a Pinnacle leg, so the soft-cap behavior above is the important one for live testing.
 
 ## Paper Execution
 
@@ -187,22 +200,24 @@ Live execution steps:
 
 1. Check `settings.min_arb_pct`.
 2. Read current venue balances from SQLite.
-3. Compute a balance-aware stake plan.
+3. Compute a balance-aware stake plan using `MAX_STAKE` as the soft-book cap.
 4. Choose leg order:
    - If one leg is Pinnacle, place the non-Pinnacle leg first.
    - For FanDuel vs DraftKings, place FanDuel first.
 5. If Pinnacle is involved, send `quote_bet` before either leg is placed.
 6. Validate quoted Pinnacle price with quote sigma.
 7. Adjust stake to Pinnacle min/max limits if needed and recalculate the other leg.
-8. Place leg 1 with `place_bet`.
-9. Drain best-effort `balance_update` messages.
-10. Recompute sigma from accepted leg 1 odds and expected leg 2 odds.
-11. Abort leg 2 if post-fill sigma is no longer an arb.
-12. Place leg 2 with `place_bet`.
-13. Drain best-effort balance updates.
-14. Insert a trade with status `executed_live`.
+8. If leg 1 is DraftKings or FanDuel, send `validate_soft` and use the fresh soft price for sigma and hedge math.
+9. If Pinnacle is leg 2, send the short `PIN_PREFIRE_RECHECK` quote immediately before leg 1 risk.
+10. Place leg 1 with `place_bet`.
+11. Drain best-effort `balance_update` messages.
+12. Recompute Pinnacle hedge from the actual filled soft stake and odds.
+13. Abort leg 2 and enter recovery if post-fill sigma/profitability is no longer acceptable.
+14. Place leg 2 with `place_bet`.
+15. Drain best-effort balance updates.
+16. Insert a trade with status `executed_live`.
 
-If leg 1 rejects, leg 2 is not placed. If leg 2 rejects after leg 1 fills, the current runtime logs one-sided exposure and returns without inserting a completed live trade. Automatic rescue hedging is not currently wired into live execution.
+If leg 1 rejects, leg 2 is not placed. If leg 2 rejects after leg 1 fills, or if post-fill checks kill the hedge, the engine enters recovery. Recovery can try Pinnacle rescue quotes, compare cashout economics, attempt DK/FD cashout, and persist unresolved exposure to `data/naked-legs.json`.
 
 ## Engine-to-Bet-Placer WebSocket
 
@@ -215,15 +230,21 @@ ws://127.0.0.1:3402
 Request types from Rust:
 
 - `get_balances`
+- `validate_soft`
 - `quote_bet`
 - `place_bet`
+- `get_bet_status`
+- `cashout`
 - `ping`
 
 Response types from Node:
 
 - `balances`
+- `validate_soft_result`
 - `quote_result`
 - `fill_report`
+- `bet_status`
+- `cashout_result`
 - `balance_update`
 - `pong`
 
@@ -249,6 +270,23 @@ Periodic refresh:
 - `BALANCE_REFRESH_CYCLES` controls how often the polling loop asks the bet placer for fresh balances.
 - Default is every 60 poll cycles, which is roughly every 5 minutes at the current 5 second poll interval.
 
+## Recovery Flow
+
+Recovery is entered only after the first live leg has filled and the normal second-leg path cannot safely continue.
+
+Current behavior:
+
+1. Fetch soft-book bet status when `purchase_id` or `bet_id` is available.
+2. Capture any DK/FD cashout offer.
+3. If a Pinnacle hedge ID exists, quote the original PIN market and nearby total/spread/team-total lines.
+4. Stop retrying after `RESCUE_PIN_HARD_YANK_THRESHOLD` hard-yank errors, default 3.
+5. Skip a rescue quote if `MAX_RESCUE_LOSS` is set and the rescue loss is above the limit.
+6. Prefer cashout over rescue when the cashout loss is smaller.
+7. If rescue does not fill, send a cashout command where supported.
+8. If unresolved, write a naked-leg ledger entry.
+
+The polling loop monitors persisted naked legs every `NAKED_LEG_MONITOR_CYCLES` cycles, default 10. The monitor rechecks status/cashout, tries original-line Pinnacle relist recovery, and removes resolved entries.
+
 ## Dashboard Broadcasts
 
 The engine broadcasts these WebSocket events to dashboard clients connected to `/ws`:
@@ -266,8 +304,9 @@ These dashboard events are separate from the engine-to-bet-placer WebSocket prot
 
 - `engine/config.toml` is not the active policy source for the main loop.
 - REST and dashboard WebSocket bind to `0.0.0.0:3401` and have no auth.
-- `cargo test` currently includes stale tests from older event ID and drift-threshold assumptions.
-- The richer state machine, treasury model, policy helper, and rescue hedger are present but not wired into the main execution path.
+- Default Pinnacle scanning requires the bet placer HTTP bridge and logged-in Pinnacle session unless `PIN_ODDS_SOURCE=guest` is set.
+- `cargo test` currently passes, but warnings remain from unused helper/legacy modules.
+- The richer state machine, treasury model, policy helper, and older `rescue_hedger.rs` calculator are present but not the main execution path.
 - A live WebSocket startup failure causes paper fallback.
 - There is no automatic live WebSocket reconnect.
 - Bet placer keepalive reloads sportsbook pages every 5 minutes, which can interfere with browser state during an active operation.

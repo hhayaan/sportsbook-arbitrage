@@ -1,15 +1,15 @@
-# API Reference (V5 Current State)
+# API Reference (Current State)
 
 This reference covers the APIs the project currently uses or exposes:
 
-- public sportsbook odds APIs consumed by the Rust engine
+- sportsbook odds APIs consumed by the Rust engine
 - authenticated sportsbook betting APIs consumed by the Node bet placer
 - the Rust engine REST API and dashboard WebSocket
 - the private Rust-to-Node bet placement WebSocket protocol
 
 Public app keys and hostnames listed here are already present in source code. User credentials, session tokens, cookies, and account-specific values must stay local.
 
-## Public Odds APIs
+## Odds APIs
 
 ### DraftKings Public Odds
 
@@ -75,15 +75,58 @@ FanDuel public odds are parsed from the `attachments` graph and normalized into 
 {marketId}:{selectionId}
 ```
 
-### Pinnacle Guest Odds
+### Pinnacle Authenticated Odds
 
-Base host:
+Default Rust fetch path:
+
+```text
+GET http://127.0.0.1:3404/pinnacle/snapshot/{leagueId}
+```
+
+Override the local base URL with:
+
+```text
+PIN_AUTH_ODDS_BASE_URL=http://127.0.0.1:3404
+```
+
+Bet placer implementation:
+
+```text
+bet-placer/index.js
+bet-placer/src/sportsbooks/pinnacle.js
+```
+
+The bet placer uses the single logged-in Pinnacle browser session, extracts `x-device-uuid` and `x-session`, then fetches:
+
+```text
+GET https://api.arcadia.pinnacle.com/0.1/leagues/{leagueId}/matchups
+GET https://api.arcadia.pinnacle.com/0.1/leagues/{leagueId}/markets/straight
+```
+
+Response shape from the local bridge:
+
+```json
+{
+  "status": "ok",
+  "league_id": 246,
+  "matchups": [],
+  "markets": []
+}
+```
+
+The old guest scan is still available only when explicitly requested:
+
+```powershell
+$env:PIN_ODDS_SOURCE = "guest"
+```
+
+Guest base host:
 
 ```text
 https://guest.api.arcadia.pinnacle.com/0.1
 ```
 
-The Rust public odds fetcher uses guest Arcadia endpoints for configured league IDs. Current Pinnacle adapter-ready selection IDs are built as:
+Current Pinnacle adapter-ready selection IDs are built as:
 
 ```text
 {matchupId}:{marketKey}:{designation}
@@ -120,7 +163,7 @@ Configured in `engine/src/config.rs`.
 | MLS | 89345 | soccer event type | 2663 |
 | UFC | 9034 | `ufc` | 1624 |
 
-NFL has no current Pinnacle league ID in the live config because the attempted Pinnacle guest league path returned 401.
+NFL has no current Pinnacle league ID in the live config because the attempted Pinnacle league path returned 401 during earlier guest-source testing.
 
 ## Authenticated Betting APIs
 
@@ -200,7 +243,7 @@ Transport:
 context.request.get/post(...)
 ```
 
-FanDuel uses Patchright's Node-side request API with cookies from the browser context plus extracted localStorage/cookie tokens.
+FanDuel uses Patchright's Node-side request API with cookies from the browser context plus extracted localStorage/cookie tokens for normal market/placement calls.
 
 Hosts:
 
@@ -223,7 +266,7 @@ referer: https://on.sportsbook.fanduel.ca/
 x-authentication: {auth token, if found}
 x-auth-token: {auth token, if found}
 x-px-context: {_px3/_pxvid/pxcts cookie context, if found}
-x-geo-packet: {location token, if found}
+x-geo-packet: {geolocation_document.jwt, falling back to location_token.jwt}
 ```
 
 Main flow:
@@ -239,6 +282,15 @@ FanDuel selection IDs use:
 ```
 
 FanDuel balance is currently scraped from the visible page. The adapter reads the username from session JWT data when available and chooses the largest visible dollar amount from simple page elements. This is fragile and should be treated as operationally sensitive.
+
+FanDuel status/cashout flow:
+
+```text
+GET https://fcq.on.sportsbook.fanduel.ca/api/v0.1/getEligibleBets?sortBy=START_TIME
+POST https://sco.on.sportsbook.fanduel.ca/api/sports/fixedodds/transactional/v1.0/cashoutBet
+```
+
+`getEligibleBets` returns open bets plus fresh `cashOutToken` values. `cashoutBet` is sent from inside the logged-in FanDuel browser page, not through the older Node-side request path, so the write can refresh and use the current `x-geo-packet` JWT.
 
 ### Pinnacle Betting
 
@@ -266,7 +318,7 @@ Static application key in source:
 x-api-key: CmX2KcMrXuFmNg6YFbmTxE0y9CIrOi0R
 ```
 
-Runtime auth is extracted from the Pinnacle browser page:
+Runtime auth is extracted from the Pinnacle browser page. The adapter searches common localStorage/sessionStorage objects first, including `Main:User`, then falls back to a localStorage scan:
 
 ```text
 localStorage["Main:User"].deviceId -> x-device-uuid
@@ -634,6 +686,48 @@ Error response:
 
 Non-Pinnacle venues currently return a synthetic ok quote with `min_stake=0`, `max_stake=999999`, and `price=0`. Live execution only relies on quote details for Pinnacle.
 
+### `validate_soft`
+
+Request:
+
+```json
+{
+  "type": "validate_soft",
+  "attempt_id": "uuid-VS",
+  "venue": "draftkings",
+  "venue_market_id": "0ML84034728_3",
+  "stake": 5.0,
+  "expected_odds": 4.5,
+  "max_slippage_pct": 0.07
+}
+```
+
+Success response:
+
+```json
+{
+  "type": "validate_soft_result",
+  "attempt_id": "uuid-VS",
+  "status": "ok",
+  "price": 4.5,
+  "display_odds": "+350"
+}
+```
+
+Error response:
+
+```json
+{
+  "type": "validate_soft_result",
+  "attempt_id": "uuid-VS",
+  "status": "error",
+  "error_message": "validate_soft returned no executable price",
+  "error_code": null
+}
+```
+
+DraftKings validation uses `calculateBets`. FanDuel validation uses `getSelectionInfo`, which refreshes market prices via the logged-in FanDuel adapter.
+
 ### `place_bet`
 
 Request:
@@ -659,6 +753,8 @@ Filled response:
   "status": "filled",
   "accepted_stake": 25.0,
   "accepted_odds": 2.1,
+  "purchase_id": "123456789",
+  "bet_id": "123456790",
   "error_message": null
 }
 ```
@@ -686,6 +782,76 @@ After a filled bet, Node best-effort sends:
 }
 ```
 
+### `get_bet_status`
+
+Request:
+
+```json
+{
+  "type": "get_bet_status",
+  "attempt_id": "uuid-STATUS",
+  "venue": "draftkings",
+  "purchase_id": "123456789",
+  "bet_id": "123456790"
+}
+```
+
+Response:
+
+```json
+{
+  "type": "bet_status",
+  "attempt_id": "uuid-STATUS",
+  "venue": "draftkings",
+  "purchase_id": "123456789",
+  "bet_id": "123456790",
+  "status": "open",
+  "raw_status": "Unsettled",
+  "cashout_available": true,
+  "cashout_offer": 4.83
+}
+```
+
+DraftKings status is based on `getPurchases`. FanDuel status is based on `getEligibleBets`; if the bet is no longer in open bets, the adapter returns `unknown` with raw status `Not Found In Open Bets`.
+
+### `cashout`
+
+Request:
+
+```json
+{
+  "type": "cashout",
+  "attempt_id": "uuid-CASHOUT",
+  "venue": "fanduel",
+  "purchase_id": "987654321",
+  "bet_id": "987654321",
+  "amount": 4.83
+}
+```
+
+Response:
+
+```json
+{
+  "type": "cashout_result",
+  "attempt_id": "uuid-CASHOUT",
+  "venue": "fanduel",
+  "bet_id": "987654321",
+  "success": true,
+  "confirmed": true,
+  "unconfirmed": false,
+  "submitted": false,
+  "terminal_non_cashout": false,
+  "payout": 4.83,
+  "payout_claimed": null,
+  "raw_status": "Cashed Out",
+  "reason": null,
+  "error": null
+}
+```
+
+DraftKings cashout requires raw `Cashed Out` confirmation or a terminal non-cashout classification. FanDuel cashout fetches a fresh `cashOutToken` before sending `cashoutBet`.
+
 ### `ping`
 
 Request:
@@ -712,22 +878,46 @@ Rust engine:
 | --- | --- | --- |
 | `LIVE_MODE` | Connect to bet placer and attempt live execution when `1`/`true` | false |
 | `FIXED_STAKE` | Startup override for settings fixed stake | DB/default |
-| `MAX_STAKE` | Startup override for max stake per leg | DB/default |
+| `MAX_STAKE` | Startup override for max non-Pinnacle soft-book stake; Pinnacle hedge is quote/balance bounded | DB/default |
 | `MIN_ARB_PCT` | Startup override for minimum arb percent | DB/default |
 | `STAKE_MODE` | `fixed` or `proportional` | DB/default |
 | `PROPORTIONAL_PCT` | Startup override for proportional staking | DB/default |
 | `ENABLED` | Startup override for execution toggle | DB/default |
 | `MAX_HOURS_TO_START` | Pregame capital lockup filter | 24 |
 | `BALANCE_REFRESH_CYCLES` | Live balance refresh interval in poll cycles | 60 |
+| `NAKED_LEG_MONITOR_CYCLES` | Recovery monitor interval in poll cycles | 10 |
 | `SKIP_LIVE` | Skip live in-play markets when `1`/`true` | false |
+| `ODDS_FETCH_TIMEOUT_MS` | Per-request odds fetch deadline for DK/FD/PIN scanning | 2500 |
 | `WS_URL` | Bet placer WebSocket URL | `ws://127.0.0.1:3402` |
+| `PIN_ODDS_SOURCE` | `auth`/`authenticated`/`logged-in` for logged-in PIN snapshot, or `guest`/`public` for old guest API | `auth` |
+| `PIN_AUTH_ODDS_BASE_URL` | Local bet-placer PIN odds bridge base URL | `http://127.0.0.1:3404` |
+| `QUOTE_TIMEOUT_MS` | General quote timeout | 10000 |
+| `PIN_FILL_TIMEOUT_MS` | Pinnacle fill-report wait timeout | 45000 |
+| `FILL_TIMEOUT_MS` | Non-Pinnacle fill-report wait timeout | 20000 |
+| `SOFT_PREFIRE_VALIDATION_ENABLED` | Enable DK/FD authenticated soft validation | true |
+| `SOFT_PREFIRE_VALIDATION_TIMEOUT_MS` | DK/FD validation timeout | 3500 |
+| `SOFT_PREFIRE_MAX_SLIPPAGE_PCT` | Sent to the bet placer with validation requests | 0.07 |
+| `PIN_PREFIRE_RECHECK_ENABLED` | Enable final Pinnacle quote before soft-leg risk | true |
+| `PIN_PREFIRE_RECHECK_TIMEOUT_MS` | Final Pinnacle quote timeout | 1500 |
+| `PIN_YANK_BLACKLIST_MS` | TTL for hard-yanked Pinnacle market IDs | 1800000 |
+| `RESCUE_PIN_HARD_YANK_THRESHOLD` | Rescue hard-yank miss threshold before stopping PIN rescue attempts | 3 |
+| `RESCUE_QUOTE_TIMEOUT_MS` | Pinnacle rescue quote timeout | 3000 |
+| `MAX_RESCUE_LOSS` | Optional max allowed rescue loss; unset means no explicit cap | unset |
+| `BET_STATUS_TIMEOUT_MS` | `get_bet_status` response timeout | 5000 |
+| `CASHOUT_TIMEOUT_MS` | `cashout` response timeout | 15000 |
+| `NAKED_LEG_PIN_RECHECK_QUOTE_TIMEOUT_MS` | Monitor quote timeout for relisted PIN rescue | 3000 |
+| `ATTEMPT_TELEMETRY_DIR` | Override telemetry root | `data` |
+| `NAKED_LEGS_FILE` | Override naked-leg ledger file | `data/naked-legs.json` |
 
 Node:
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `WS_PORT` | Bet placer WebSocket port | 3402 |
+| `PIN_ODDS_PORT` | Bet placer local HTTP port for authenticated PIN snapshots | 3404 |
 | `DK_PROXY_PORT` | DraftKings proxy port | 3403 |
+| `DK_PROXY_FETCH_TIMEOUT_MS` | DraftKings proxy upstream fetch deadline; falls back to `ODDS_FETCH_TIMEOUT_MS` if set | 2500 |
+| `FD_WRITE_TIMEOUT_MS` | FanDuel browser-page write timeout for cashout | 25000 |
 
 ## Compatibility Notes
 

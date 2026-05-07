@@ -16,8 +16,8 @@ const SPORTSBOOKS = {
   },
   pinnacle: {
     name: "Pinnacle",
-    url: "https://www.pinnacle.com",
-    loginUrl: "https://www.pinnacle.com",
+    url: "https://www.pinnacle.ca",
+    loginUrl: "https://www.pinnacle.ca",
   },
   espnbet: {
     name: "ESPN BET",

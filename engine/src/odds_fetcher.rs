@@ -3,10 +3,24 @@ use crate::models::CanonicalMarket;
 use crate::team_names;
 use reqwest::Client;
 use serde_json::Value;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const DEFAULT_ODDS_FETCH_TIMEOUT_MS: u64 = 2_500;
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+fn odds_fetch_timeout() -> Duration {
+    let ms = std::env::var("ODDS_FETCH_TIMEOUT_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|ms| (250..=30_000).contains(ms))
+        .unwrap_or(DEFAULT_ODDS_FETCH_TIMEOUT_MS);
+    Duration::from_millis(ms)
 }
 
 /// Detect market period from label text (DK/FD market names).
@@ -45,9 +59,61 @@ fn american_to_decimal(american: f64) -> f64 {
     }
 }
 
+#[derive(Clone, Copy)]
+enum PinnacleOddsSource {
+    Authenticated,
+    Guest,
+}
+
+impl PinnacleOddsSource {
+    fn from_env() -> Self {
+        match std::env::var("PIN_ODDS_SOURCE")
+            .unwrap_or_else(|_| "auth".to_string())
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "auth" | "authenticated" | "logged-in" | "logged_in" => Self::Authenticated,
+            "guest" | "public" => Self::Guest,
+            other => {
+                tracing::warn!(
+                    "Unknown PIN_ODDS_SOURCE='{}'; using authenticated Pinnacle odds",
+                    other
+                );
+                Self::Authenticated
+            }
+        }
+    }
+
+    fn log_label(self) -> &'static str {
+        "PIN"
+    }
+
+    fn source_name(self) -> &'static str {
+        match self {
+            Self::Authenticated => "auth",
+            Self::Guest => "guest",
+        }
+    }
+}
+
+pub fn pinnacle_odds_source_name() -> &'static str {
+    PinnacleOddsSource::from_env().source_name()
+}
+
+pub fn pinnacle_auth_odds_base_url() -> String {
+    std::env::var("PIN_AUTH_ODDS_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:3404".to_string())
+}
+
+pub fn draftkings_proxy_base_url() -> String {
+    let port = std::env::var("DK_PROXY_PORT").unwrap_or_else(|_| "3403".to_string());
+    format!("http://127.0.0.1:{}", port)
+}
+
 pub async fn fetch_all(client: &Client) -> Vec<CanonicalMarket> {
     let sports = config::sports();
     let mut handles: Vec<tokio::task::JoinHandle<Vec<CanonicalMarket>>> = Vec::new();
+    let pin_source = PinnacleOddsSource::from_env();
 
     for sport in &sports {
         // DraftKings — spawn concurrent
@@ -90,11 +156,11 @@ pub async fn fetch_all(client: &Client) -> Vec<CanonicalMarket> {
             handles.push(tokio::spawn(async move {
                 match fetch_fanduel_by_event_type(&c, name, event_type_id).await {
                     Ok(markets) => {
-                        tracing::info!("[FD-ET] {:<10} → {} markets", name, markets.len());
+                        tracing::info!("[FD]    {:<10} → {} markets", name, markets.len());
                         markets
                     }
                     Err(e) => {
-                        tracing::warn!("[FD-ET] {} fetch failed: {}", name, e);
+                        tracing::warn!("[FD] {} fetch failed: {}", name, e);
                         Vec::new()
                     }
                 }
@@ -105,14 +171,20 @@ pub async fn fetch_all(client: &Client) -> Vec<CanonicalMarket> {
         for &league_id in &sport.pin_league_ids {
             let c = client.clone();
             let name = sport.name;
+            let source = pin_source;
             handles.push(tokio::spawn(async move {
-                match fetch_pinnacle(&c, name, league_id).await {
+                match fetch_pinnacle(&c, name, league_id, source).await {
                     Ok(markets) => {
-                        tracing::info!("[PIN]   {:<10} → {} markets", name, markets.len());
+                        tracing::info!(
+                            "[{}]   {:<10} → {} markets",
+                            source.log_label(),
+                            name,
+                            markets.len()
+                        );
                         markets
                     }
                     Err(e) => {
-                        tracing::warn!("[PIN] {} fetch failed: {}", name, e);
+                        tracing::warn!("[{}] {} fetch failed: {}", source.log_label(), name, e);
                         Vec::new()
                     }
                 }
@@ -139,7 +211,7 @@ async fn fetch_draftkings(
 ) -> Result<Vec<CanonicalMarket>, String> {
     // Use local Node.js proxy (dk-proxy.js on port 3403) to work around
     // reqwest TLS incompatibility with DK's CDN on Windows.
-    let proxy_url = format!("http://localhost:3403/dk/{}", group_id);
+    let proxy_url = format!("{}/dk/{}", draftkings_proxy_base_url(), group_id);
 
     match fetch_dk_inner(client, &proxy_url, sport, group_id).await {
         Ok(markets) if !markets.is_empty() => return Ok(markets),
@@ -152,7 +224,9 @@ async fn fetch_draftkings(
     // Fallback: try direct (works on Linux/AWS, fails on Windows)
     let direct_url = format!(
         "https://{}/sites/{}/api/sportscontent/dkcaon/v1/leagues/{}",
-        config::DK_HOSTNAME, config::DK_SITE_CODE, group_id
+        config::DK_HOSTNAME,
+        config::DK_SITE_CODE,
+        group_id
     );
     fetch_dk_inner(client, &direct_url, sport, group_id).await
 }
@@ -163,12 +237,14 @@ async fn fetch_dk_inner(
     sport: &str,
     _group_id: u64,
 ) -> Result<Vec<CanonicalMarket>, String> {
-
     let resp = client
         .get(url)
-        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        )
         .header("Accept", "application/json")
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(odds_fetch_timeout())
         .send()
         .await
         .map_err(|e| format!("request failed: {}", e))?;
@@ -177,7 +253,10 @@ async fn fetch_dk_inner(
         return Err(format!("status {}", resp.status()));
     }
 
-    let json: Value = resp.json().await.map_err(|e| format!("json parse: {}", e))?;
+    let json: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("json parse: {}", e))?;
     let ts = now_ms();
     let mut out = Vec::new();
 
@@ -201,7 +280,8 @@ async fn fetch_dk_inner(
     }
 
     // Build event lookup (string keys — DK returns IDs as strings)
-    let mut events_map: std::collections::HashMap<String, &Value> = std::collections::HashMap::new();
+    let mut events_map: std::collections::HashMap<String, &Value> =
+        std::collections::HashMap::new();
     for ev in events {
         if let Some(id) = ev.get("id") {
             events_map.insert(val_str(id), ev);
@@ -209,20 +289,26 @@ async fn fetch_dk_inner(
     }
 
     // Build market lookup by eventId, filter for main markets we care about
-    let mut markets_by_event: std::collections::HashMap<String, Vec<&Value>> = std::collections::HashMap::new();
+    let mut markets_by_event: std::collections::HashMap<String, Vec<&Value>> =
+        std::collections::HashMap::new();
     for mkt in dk_markets {
         let is_main = mkt.get("main").and_then(|v| v.as_bool()).unwrap_or(false);
-        if !is_main { continue; }
+        if !is_main {
+            continue;
+        }
         let name = mkt.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let mkt_type = resolve_dk_market_type(name, is_main);
-        if mkt_type.is_empty() { continue; }
+        if mkt_type.is_empty() {
+            continue;
+        }
         if let Some(eid) = mkt.get("eventId") {
             markets_by_event.entry(val_str(eid)).or_default().push(mkt);
         }
     }
 
     // Build selection lookup by marketId
-    let mut sels_by_market: std::collections::HashMap<String, Vec<&Value>> = std::collections::HashMap::new();
+    let mut sels_by_market: std::collections::HashMap<String, Vec<&Value>> =
+        std::collections::HashMap::new();
     for sel in selections {
         if let Some(mid) = sel.get("marketId") {
             sels_by_market.entry(val_str(mid)).or_default().push(sel);
@@ -231,17 +317,28 @@ async fn fetch_dk_inner(
 
     for (eid_str, event) in &events_map {
         let event_name = event.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let start_time = event.get("startEventDate").and_then(|v| v.as_str()).unwrap_or("");
+        let start_time = event
+            .get("startEventDate")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let is_live = event.get("status").and_then(|v| v.as_str()) == Some("STARTED");
 
         let participants = event.get("participants").and_then(|v| v.as_array());
         let (dk_away, dk_home) = if let Some(parts) = participants {
-            let away = parts.iter().find(|p| p.get("venueRole").and_then(|v| v.as_str()) == Some("Away"))
+            let away = parts
+                .iter()
+                .find(|p| p.get("venueRole").and_then(|v| v.as_str()) == Some("Away"))
                 .or_else(|| parts.first());
-            let home = parts.iter().find(|p| p.get("venueRole").and_then(|v| v.as_str()) == Some("Home"))
+            let home = parts
+                .iter()
+                .find(|p| p.get("venueRole").and_then(|v| v.as_str()) == Some("Home"))
                 .or_else(|| parts.get(1));
-            let away_name = away.and_then(|p| p.get("name").and_then(|v| v.as_str())).unwrap_or("");
-            let home_name = home.and_then(|p| p.get("name").and_then(|v| v.as_str())).unwrap_or("");
+            let away_name = away
+                .and_then(|p| p.get("name").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            let home_name = home
+                .and_then(|p| p.get("name").and_then(|v| v.as_str()))
+                .unwrap_or("");
             (away_name.to_string(), home_name.to_string())
         } else {
             parse_dk_event_teams(event_name)
@@ -259,12 +356,14 @@ async fn fetch_dk_inner(
                 let label = sel.get("label").and_then(|v| v.as_str()).unwrap_or("");
                 let sel_id = sel.get("id").and_then(|v| v.as_str()).unwrap_or(""); // e.g., "0ML84048103_3"
 
-                let dec = sel.get("displayOdds")
+                let dec = sel
+                    .get("displayOdds")
                     .and_then(|d| d.get("decimal"))
                     .and_then(|v| v.as_str())
                     .and_then(|s| s.parse::<f64>().ok())
                     .or_else(|| sel.get("trueOdds").and_then(|v| v.as_f64()));
-                let american = sel.get("displayOdds")
+                let american = sel
+                    .get("displayOdds")
                     .and_then(|d| d.get("american"))
                     .and_then(|v| v.as_str())
                     .and_then(|s| s.replace('−', "-").replace('+', "").parse::<f64>().ok());
@@ -320,8 +419,12 @@ fn parse_dk_offer(
     };
 
     let event_name = event.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    let start_time = event.get("startDate").and_then(|v| v.as_str()).unwrap_or("");
-    let is_live = event.get("eventStatus")
+    let start_time = event
+        .get("startDate")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let is_live = event
+        .get("eventStatus")
         .and_then(|v| v.get("state"))
         .and_then(|v| v.as_str())
         .map(|s| s == "STARTED")
@@ -336,7 +439,10 @@ fn parse_dk_offer(
     // Parse home/away from event name (DK format: "Away at/vs Home" or "Away @ Home")
     let (dk_away, dk_home) = parse_dk_event_teams(event_name);
     let dk_event_id = team_names::canonical_event_id(sport, &dk_away, &dk_home, start_time);
-    let offer_id = offer.get("providerOfferId").and_then(|v| v.as_str()).unwrap_or("");
+    let offer_id = offer
+        .get("providerOfferId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
     if let Some(outcomes) = offer.get("outcomes").and_then(|v| v.as_array()) {
         for outcome in outcomes {
@@ -344,10 +450,10 @@ fn parse_dk_offer(
             let odds_decimal = outcome
                 .get("oddsDecimal")
                 .and_then(|v| v.as_f64())
-                .or_else(|| {
-                    outcome.get("odds").and_then(|v| v.as_f64())
-                });
-            let odds_american = outcome.get("oddsAmerican").and_then(|v| v.as_str())
+                .or_else(|| outcome.get("odds").and_then(|v| v.as_f64()));
+            let odds_american = outcome
+                .get("oddsAmerican")
+                .and_then(|v| v.as_str())
                 .and_then(|s| s.replace('+', "").parse::<f64>().ok());
 
             let decimal = match odds_decimal {
@@ -362,7 +468,9 @@ fn parse_dk_offer(
                 continue;
             }
 
-            let line = outcome.get("line").and_then(|v| v.as_f64())
+            let line = outcome
+                .get("line")
+                .and_then(|v| v.as_f64())
                 .or_else(|| outcome.get("points").and_then(|v| v.as_f64()));
 
             let sel_normalized = team_names::normalize_selection(&market_type, selection, sport);
@@ -409,11 +517,19 @@ fn resolve_dk_market_type(label: &str, is_main: bool) -> String {
     if lower.contains("moneyline") || lower == "money line" {
         "moneyline".to_string()
     } else if lower.contains("spread") || lower.contains("point spread") {
-        if is_main { "spread".to_string() } else { "alt_spread".to_string() }
+        if is_main {
+            "spread".to_string()
+        } else {
+            "alt_spread".to_string()
+        }
     } else if lower.contains("total") && lower.contains("team") {
         "team_total".to_string()
     } else if lower.contains("total") || lower.contains("over/under") || lower.contains("o/u") {
-        if is_main { "total".to_string() } else { "alt_total".to_string() }
+        if is_main {
+            "total".to_string()
+        } else {
+            "alt_total".to_string()
+        }
     } else {
         String::new()
     }
@@ -435,9 +551,12 @@ async fn fetch_fanduel(
 
         let resp = match client
             .get(&url)
-            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .header(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            )
             .header("Accept", "application/json")
-            .timeout(std::time::Duration::from_secs(15))
+            .timeout(odds_fetch_timeout())
             .send()
             .await
         {
@@ -480,19 +599,22 @@ async fn fetch_fanduel_by_event_type(
 
         let resp = match client
             .get(&url)
-            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .header(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            )
             .header("Accept", "application/json")
-            .timeout(std::time::Duration::from_secs(15))
+            .timeout(odds_fetch_timeout())
             .send()
             .await
         {
             Ok(r) if r.status().is_success() => r,
             Ok(r) => {
-                tracing::debug!("[FD-ET] {} state={} status={}", sport, state, r.status());
+                tracing::debug!("[FD] {} state={} status={}", sport, state, r.status());
                 continue;
             }
             Err(e) => {
-                tracing::debug!("[FD-ET] {} state={} err={}", sport, state, e);
+                tracing::debug!("[FD] {} state={} err={}", sport, state, e);
                 continue;
             }
         };
@@ -503,12 +625,12 @@ async fn fetch_fanduel_by_event_type(
             }
             Ok(_) => continue,
             Err(e) => {
-                tracing::debug!("[FD-ET] {} state={} parse err={}", sport, state, e);
+                tracing::debug!("[FD] {} state={} parse err={}", sport, state, e);
                 continue;
             }
         }
     }
-    Err(format!("FD-ET {} all states failed", sport))
+    Err(format!("FD {} all states failed", sport))
 }
 
 fn parse_fd_response(json: &Value, sport: &str) -> Result<Vec<CanonicalMarket>, String> {
@@ -521,7 +643,8 @@ fn parse_fd_response(json: &Value, sport: &str) -> Result<Vec<CanonicalMarket>, 
     };
 
     // Build event lookup
-    let mut events_map: std::collections::HashMap<String, &Value> = std::collections::HashMap::new();
+    let mut events_map: std::collections::HashMap<String, &Value> =
+        std::collections::HashMap::new();
     if let Some(events) = attachments.get("events").and_then(|v| v.as_object()) {
         for (k, v) in events {
             events_map.insert(k.clone(), v);
@@ -557,8 +680,14 @@ fn parse_fd_response(json: &Value, sport: &str) -> Result<Vec<CanonicalMarket>, 
                 .and_then(|e| e.get("inPlay").and_then(|v| v.as_bool()))
                 .unwrap_or(false);
 
-            let market_name = market.get("marketName").and_then(|v| v.as_str()).unwrap_or("");
-            let market_type_raw = market.get("marketType").and_then(|v| v.as_str()).unwrap_or(market_name);
+            let market_name = market
+                .get("marketName")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let market_type_raw = market
+                .get("marketType")
+                .and_then(|v| v.as_str())
+                .unwrap_or(market_name);
             let market_type = resolve_fd_market_type(market_type_raw, market_name);
             if market_type.is_empty() {
                 continue;
@@ -574,7 +703,10 @@ fn parse_fd_response(json: &Value, sport: &str) -> Result<Vec<CanonicalMarket>, 
 
             if let Some(runners) = market.get("runners").and_then(|v| v.as_array()) {
                 for runner in runners {
-                    let runner_name = runner.get("runnerName").and_then(|v| v.as_str()).unwrap_or("");
+                    let runner_name = runner
+                        .get("runnerName")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     let handicap = runner.get("handicap").and_then(|v| v.as_f64());
 
                     let decimal = runner
@@ -595,24 +727,49 @@ fn parse_fd_response(json: &Value, sport: &str) -> Result<Vec<CanonicalMarket>, 
                         continue;
                     }
 
-                    let sel_normalized = team_names::normalize_selection(&market_type, runner_name, sport);
+                    let sel_normalized =
+                        team_names::normalize_selection(&market_type, runner_name, sport);
 
                     let period = detect_period(market_name);
 
                     // Build adapter-ready selection ID: "marketId:selectionId"
-                    let market_id_str = market.get("marketId")
-                        .and_then(|v| if v.is_string() { v.as_str().map(|s| s.to_string()) } else { v.as_u64().map(|n| n.to_string()) })
+                    let market_id_str = market
+                        .get("marketId")
+                        .and_then(|v| {
+                            if v.is_string() {
+                                v.as_str().map(|s| s.to_string())
+                            } else {
+                                v.as_u64().map(|n| n.to_string())
+                            }
+                        })
                         .unwrap_or_default();
-                    let selection_id_str = runner.get("selectionId")
-                        .and_then(|v| if v.is_string() { v.as_str().map(|s| s.to_string()) } else { v.as_u64().map(|n| n.to_string()) })
+                    let selection_id_str = runner
+                        .get("selectionId")
+                        .and_then(|v| {
+                            if v.is_string() {
+                                v.as_str().map(|s| s.to_string())
+                            } else {
+                                v.as_u64().map(|n| n.to_string())
+                            }
+                        })
                         .unwrap_or_default();
                     let adapter_sel_id = format!("{}:{}", market_id_str, selection_id_str);
 
                     out_push_fd(
                         &mut markets,
-                        &fd_event_id, sport, start_time, &market_type,
-                        &sel_normalized, handicap, decimal, american,
-                        is_live, &adapter_sel_id, runner_name, ts, period,
+                        &fd_event_id,
+                        sport,
+                        start_time,
+                        &market_type,
+                        &sel_normalized,
+                        handicap,
+                        decimal,
+                        american,
+                        is_live,
+                        &adapter_sel_id,
+                        runner_name,
+                        ts,
+                        period,
                     );
                 }
             }
@@ -624,9 +781,19 @@ fn parse_fd_response(json: &Value, sport: &str) -> Result<Vec<CanonicalMarket>, 
 
 fn out_push_fd(
     out: &mut Vec<CanonicalMarket>,
-    event_id: &str, sport: &str, start_time: &str, market_type: &str,
-    selection: &str, line: Option<f64>, decimal: f64, american: Option<f64>,
-    is_live: bool, adapter_sel_id: &str, _runner_name: &str, ts: u64, period: &str,
+    event_id: &str,
+    sport: &str,
+    start_time: &str,
+    market_type: &str,
+    selection: &str,
+    line: Option<f64>,
+    decimal: f64,
+    american: Option<f64>,
+    is_live: bool,
+    adapter_sel_id: &str,
+    _runner_name: &str,
+    ts: u64,
+    period: &str,
 ) {
     out.push(CanonicalMarket {
         event_id: event_id.to_string(),
@@ -664,17 +831,21 @@ fn parse_fd_event_teams(event_name: &str) -> (String, String) {
 fn resolve_fd_market_type(market_type: &str, market_name: &str) -> String {
     let lower_type = market_type.to_lowercase();
     let lower_name = market_name.to_lowercase();
-    if lower_type.contains("moneyline") || lower_name.contains("moneyline")
-        || lower_type.contains("match_betting") || lower_type.contains("match betting")
+    if lower_type.contains("moneyline")
+        || lower_name.contains("moneyline")
+        || lower_type.contains("match_betting")
+        || lower_type.contains("match betting")
     {
         "moneyline".to_string()
-    } else if lower_type.contains("spread") || lower_name.contains("spread")
+    } else if lower_type.contains("spread")
+        || lower_name.contains("spread")
         || lower_type.contains("handicap")
     {
         "spread".to_string()
     } else if lower_type.contains("team_total") || lower_name.contains("team total") {
         "team_total".to_string()
-    } else if lower_type.contains("total") || lower_name.contains("total")
+    } else if lower_type.contains("total")
+        || lower_name.contains("total")
         || lower_name.contains("over/under")
     {
         "total".to_string()
@@ -689,22 +860,88 @@ async fn fetch_pinnacle(
     client: &Client,
     sport: &str,
     league_id: u64,
+    source: PinnacleOddsSource,
+) -> Result<Vec<CanonicalMarket>, String> {
+    match source {
+        PinnacleOddsSource::Authenticated => {
+            fetch_pinnacle_authenticated(client, sport, league_id).await
+        }
+        PinnacleOddsSource::Guest => fetch_pinnacle_guest(client, sport, league_id).await,
+    }
+}
+
+async fn fetch_pinnacle_authenticated(
+    client: &Client,
+    sport: &str,
+    league_id: u64,
+) -> Result<Vec<CanonicalMarket>, String> {
+    let base = pinnacle_auth_odds_base_url();
+    let url = format!(
+        "{}/pinnacle/snapshot/{}",
+        base.trim_end_matches('/'),
+        league_id
+    );
+
+    let resp = client
+        .get(&url)
+        .header("Accept", "application/json")
+        .timeout(odds_fetch_timeout())
+        .send()
+        .await
+        .map_err(|e| format!("authenticated snapshot request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let preview: String = body.chars().take(300).collect();
+        return Err(format!(
+            "authenticated snapshot status {}: {}",
+            status, preview
+        ));
+    }
+
+    let json: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("authenticated snapshot json parse: {}", e))?;
+    let matchups_json = json
+        .get("matchups")
+        .ok_or_else(|| format!("authenticated snapshot {} missing matchups", sport))?;
+    let markets_json = json
+        .get("markets")
+        .ok_or_else(|| format!("authenticated snapshot {} missing markets", sport))?;
+
+    parse_pinnacle_markets(sport, matchups_json, markets_json, now_ms())
+}
+
+async fn fetch_pinnacle_guest(
+    client: &Client,
+    sport: &str,
+    league_id: u64,
 ) -> Result<Vec<CanonicalMarket>, String> {
     // Step 1: Fetch matchups (events)
     let matchups_url = format!(
         "https://{}/0.1/leagues/{}/matchups",
-        config::PIN_DOMAIN, league_id
+        config::PIN_DOMAIN,
+        league_id
     );
     let matchups_resp = client
         .get(&matchups_url)
-        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        .timeout(std::time::Duration::from_secs(10))
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        )
+        .timeout(odds_fetch_timeout())
         .send()
         .await
         .map_err(|e| e.to_string())?;
 
     if !matchups_resp.status().is_success() {
-        return Err(format!("PIN matchups {} status: {}", sport, matchups_resp.status()));
+        return Err(format!(
+            "PIN matchups {} status: {}",
+            sport,
+            matchups_resp.status()
+        ));
     }
 
     let matchups_json: Value = matchups_resp.json().await.map_err(|e| e.to_string())?;
@@ -712,25 +949,42 @@ async fn fetch_pinnacle(
     // Step 2: Fetch markets (odds)
     let markets_url = format!(
         "https://{}/0.1/leagues/{}/markets/straight",
-        config::PIN_DOMAIN, league_id
+        config::PIN_DOMAIN,
+        league_id
     );
     let markets_resp = client
         .get(&markets_url)
-        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        .timeout(std::time::Duration::from_secs(10))
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        )
+        .timeout(odds_fetch_timeout())
         .send()
         .await
         .map_err(|e| e.to_string())?;
 
     if !markets_resp.status().is_success() {
-        return Err(format!("PIN markets {} status: {}", sport, markets_resp.status()));
+        return Err(format!(
+            "PIN markets {} status: {}",
+            sport,
+            markets_resp.status()
+        ));
     }
 
     let markets_json: Value = markets_resp.json().await.map_err(|e| e.to_string())?;
     let ts = now_ms();
+    parse_pinnacle_markets(sport, &matchups_json, &markets_json, ts)
+}
 
+fn parse_pinnacle_markets(
+    sport: &str,
+    matchups_json: &Value,
+    markets_json: &Value,
+    ts: u64,
+) -> Result<Vec<CanonicalMarket>, String> {
     // Build matchup lookup: id → {participants, startTime, isLive}
-    let mut matchup_map: std::collections::HashMap<u64, MatchupInfo> = std::collections::HashMap::new();
+    let mut matchup_map: std::collections::HashMap<u64, MatchupInfo> =
+        std::collections::HashMap::new();
     if let Some(arr) = matchups_json.as_array() {
         for m in arr {
             let m_type = m.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -741,7 +995,11 @@ async fn fetch_pinnacle(
                 Some(id) => id,
                 None => continue,
             };
-            let start_time = m.get("startTime").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let start_time = m
+                .get("startTime")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let is_live = m.get("isLive").and_then(|v| v.as_bool()).unwrap_or(false);
 
             let mut home = String::new();
@@ -764,7 +1022,17 @@ async fn fetch_pinnacle(
                 }
             }
 
-            matchup_map.insert(id, MatchupInfo { home, away, home_id, away_id, start_time, is_live });
+            matchup_map.insert(
+                id,
+                MatchupInfo {
+                    home,
+                    away,
+                    home_id,
+                    away_id,
+                    start_time,
+                    is_live,
+                },
+            );
         }
     }
 
@@ -783,8 +1051,13 @@ async fn fetch_pinnacle(
             };
 
             // Skip alternate lines — only use main markets
-            let is_alternate = mkt.get("isAlternate").and_then(|v| v.as_bool()).unwrap_or(false);
-            if is_alternate { continue; }
+            let is_alternate = mkt
+                .get("isAlternate")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if is_alternate {
+                continue;
+            }
 
             let mtype = mkt.get("type").and_then(|v| v.as_str()).unwrap_or("");
             let market_type = match mtype {
@@ -803,14 +1076,15 @@ async fn fetch_pinnacle(
                 3 => "first_3_innings",
                 4 => "inning_4",
                 5 => "inning_5",
-                6 => "regulation",    // NHL/soccer 3-way with draw
+                6 => "regulation", // NHL/soccer 3-way with draw
                 7 => "inning_7",
                 8 => "inning_8",
                 9 => "inning_9",
                 _ => "full_game",
             };
 
-            let pin_event_id = team_names::canonical_event_id(sport, &info.away, &info.home, &info.start_time);
+            let pin_event_id =
+                team_names::canonical_event_id(sport, &info.away, &info.home, &info.start_time);
 
             if let Some(prices) = mkt.get("prices").and_then(|v| v.as_array()) {
                 for price in prices {
@@ -823,17 +1097,20 @@ async fn fetch_pinnacle(
                         continue;
                     }
 
-                    let designation = price.get("designation").and_then(|v| v.as_str()).unwrap_or("");
+                    let designation = price
+                        .get("designation")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     let points = price.get("points").and_then(|v| v.as_f64());
                     let participant_id = price.get("participantId").and_then(|v| v.as_u64());
 
-                    let raw_selection = resolve_pin_selection(
-                        market_type, designation, participant_id, &info,
-                    );
+                    let raw_selection =
+                        resolve_pin_selection(market_type, designation, participant_id, &info);
                     if raw_selection.is_empty() {
                         continue;
                     }
-                    let selection = team_names::normalize_selection(market_type, &raw_selection, sport);
+                    let selection =
+                        team_names::normalize_selection(market_type, &raw_selection, sport);
 
                     out.push(CanonicalMarket {
                         event_id: pin_event_id.clone(),
@@ -854,9 +1131,22 @@ async fn fetch_pinnacle(
                             // Adapter-ready: "{matchupId}:{marketKey}:{designation}"
                             let mkey = match market_type {
                                 "moneyline" => format!("s;{};m", period),
-                                "spread" => format!("s;{};s;{}", period, points.map(|p| format!("{:.1}", p)).unwrap_or_default()),
-                                "total" => format!("s;{};ou;{}", period, points.map(|p| format!("{:.1}", p)).unwrap_or_default()),
-                                "team_total" => format!("s;{};tt;{};{}", period, points.map(|p| format!("{:.1}", p)).unwrap_or_default(), designation),
+                                "spread" => format!(
+                                    "s;{};s;{}",
+                                    period,
+                                    points.map(|p| format!("{:.1}", p)).unwrap_or_default()
+                                ),
+                                "total" => format!(
+                                    "s;{};ou;{}",
+                                    period,
+                                    points.map(|p| format!("{:.1}", p)).unwrap_or_default()
+                                ),
+                                "team_total" => format!(
+                                    "s;{};tt;{};{}",
+                                    period,
+                                    points.map(|p| format!("{:.1}", p)).unwrap_or_default(),
+                                    designation
+                                ),
                                 _ => format!("s;{};m", period),
                             };
                             format!("{}:{}:{}", matchup_id, mkey, designation)
@@ -904,13 +1194,11 @@ fn resolve_pin_selection(
                 _ => String::new(),
             }
         }
-        "total" | "team_total" => {
-            match designation {
-                "over" => "over".to_string(),
-                "under" => "under".to_string(),
-                _ => String::new(),
-            }
-        }
+        "total" | "team_total" => match designation {
+            "over" => "over".to_string(),
+            "under" => "under".to_string(),
+            _ => String::new(),
+        },
         _ => String::new(),
     }
 }

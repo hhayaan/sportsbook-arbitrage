@@ -2,7 +2,6 @@ const crypto = require("crypto");
 
 const API_BASE = "https://api.arcadia.pinnacle.com/0.1";
 const X_API_KEY = "CmX2KcMrXuFmNg6YFbmTxE0y9CIrOi0R";
-const TOKEN_REFRESH_MS = 5 * 60 * 1000; // Re-read tokens from browser every 5 min
 
 class PinnacleAdapter {
   constructor(browserManager) {
@@ -12,6 +11,7 @@ class PinnacleAdapter {
     this.session = null;
     this.username = null;
     this._lastTokenRefresh = 0;
+    this._tokenSource = null;
   }
 
   _getPage() {
@@ -21,23 +21,68 @@ class PinnacleAdapter {
   }
 
   async _refreshTokens() {
-    const now = Date.now();
-    if (this.session && now - this._lastTokenRefresh < TOKEN_REFRESH_MS) return;
-
     const page = this._getPage();
     const user = await page.evaluate(`
       (() => {
         try {
-          const u = JSON.parse(localStorage.getItem("Main:User") || "{}");
-          return { deviceUuid: u.deviceId || null, session: u.token || null, username: u.username || null };
-        } catch(e) { return { deviceUuid: null, session: null, username: null }; }
+          function fromObj(obj) {
+            if (!obj || typeof obj !== "object") return null;
+            const deviceUuid = obj.deviceId || obj.deviceUuid || obj.device_id || null;
+            const session = obj.token || obj.session || obj.sessionId || obj.x_session || null;
+            const username = obj.username || obj.userName || obj.login || null;
+            if (deviceUuid && session) return { deviceUuid, session, username };
+            return null;
+          }
+
+          const keys = ["Main:User", "User", "user", "auth", "Main:Auth", "session"];
+          for (const key of keys) {
+            const raw = localStorage.getItem(key);
+            if (!raw) continue;
+            try {
+              const parsed = JSON.parse(raw);
+              const top = fromObj(parsed);
+              if (top) return { ...top, source: "localStorage:" + key };
+              for (const [nestedKey, nestedValue] of Object.entries(parsed)) {
+                const nested = fromObj(nestedValue);
+                if (nested) return { ...nested, source: "localStorage:" + key + "." + nestedKey };
+              }
+            } catch (_) {}
+          }
+
+          for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            const raw = localStorage.getItem(key);
+            if (!raw) continue;
+            try {
+              const parsed = JSON.parse(raw);
+              const top = fromObj(parsed);
+              if (top) return { ...top, source: "localStorage-scan:" + key };
+            } catch (_) {}
+          }
+
+          for (const key of keys) {
+            const raw = sessionStorage.getItem(key);
+            if (!raw) continue;
+            try {
+              const parsed = JSON.parse(raw);
+              const top = fromObj(parsed);
+              if (top) return { ...top, source: "sessionStorage:" + key };
+            } catch (_) {}
+          }
+
+          return { deviceUuid: null, session: null, username: null, source: null };
+        } catch(e) { return { deviceUuid: null, session: null, username: null, source: null }; }
       })()
     `);
 
     this.deviceUuid = user.deviceUuid;
     this.session = user.session;
     this.username = user.username;
-    this._lastTokenRefresh = now;
+    if (user.source && user.source !== this._tokenSource) {
+      console.log(`[PIN] Token source: ${user.source}`);
+    }
+    this._tokenSource = user.source;
+    this._lastTokenRefresh = Date.now();
   }
 
   async _apiRequest(url, options = {}) {
@@ -52,8 +97,14 @@ class PinnacleAdapter {
       "referer": "https://www.pinnacle.ca/",
     };
 
-    if (this.deviceUuid) headers["x-device-uuid"] = this.deviceUuid;
-    if (this.session) headers["x-session"] = this.session;
+    if (!this.deviceUuid || !this.session) {
+      throw new Error(
+        'NOT_LOGGED_IN: Pinnacle browser is open but no usable session token was found. Log into https://www.pinnacle.ca in the opened Pinnacle window, then retry "balance pinnacle".'
+      );
+    }
+
+    headers["x-device-uuid"] = this.deviceUuid;
+    headers["x-session"] = this.session;
 
     const fetchOptions = { method, headers };
     if (body) fetchOptions.body = JSON.stringify(body);
@@ -77,6 +128,28 @@ class PinnacleAdapter {
     return {
       username: this.username || "pinnacle_user",
       accounts: [{ currencyCode: data.currency || "CAD", balance: data.amount || 0 }],
+    };
+  }
+
+  async getLeagueSnapshot(leagueId) {
+    const id = Number.parseInt(leagueId, 10);
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new Error(`Invalid Pinnacle league id: ${leagueId}`);
+    }
+
+    const matchupsResp = await this._apiRequest(`${API_BASE}/leagues/${id}/matchups`);
+    if (matchupsResp.status !== 200) {
+      throw new Error(`matchups failed (${matchupsResp.status}): ${matchupsResp.body}`);
+    }
+
+    const marketsResp = await this._apiRequest(`${API_BASE}/leagues/${id}/markets/straight`);
+    if (marketsResp.status !== 200) {
+      throw new Error(`markets failed (${marketsResp.status}): ${marketsResp.body}`);
+    }
+
+    return {
+      matchups: matchupsResp.json(),
+      markets: marketsResp.json(),
     };
   }
 

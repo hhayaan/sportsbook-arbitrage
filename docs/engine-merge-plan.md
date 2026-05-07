@@ -25,7 +25,7 @@ pure Rust engine logic, terminal-first operation, and current market scope only.
 | Core model | Canonical order book using `CanonicalMarket`, `MarketIdentityKey`, and generic cross-venue detection. | Tactical DK/FD soft book against Pinnacle hedge scanner. | Keep Rust's canonical model. Main live loop still requires a Pinnacle leg. |
 | Detection scope | Can theoretically detect DK/FD/PIN combinations, but production path already requires Pinnacle. | Production fire path is soft book first, Pinnacle hedge second. | Kept. No DK-vs-FD live expansion. |
 | Market scope | Moneyline, spread, total fields, plus model capacity for props/other surfaces. | Broader canary surfaces, player props, alts, and period experiments. | Keep ML/spreads/totals only. Props and broad surfaces are unplanned. |
-| Public Pinnacle odds | Public/book Pinnacle prices could influence candidate math before live execution. | Public/guest PIN is discovery only; logged-in quote is executable truth. | Merged for execution. |
+| Public Pinnacle odds | Public/book Pinnacle prices could influence candidate math before live execution. | Public/guest PIN is discovery only; logged-in quote is executable truth. | Merged for execution, then upgraded for scanning: authenticated PIN is now default and guest is behind `PIN_ODDS_SOURCE=guest`. |
 | Authenticated Pinnacle quote | Existing `quote_bet` was present but not fully binding for stake math. | Logged-in quote price/min/max is the hedge truth. | Merged. |
 | Quote freshness model | Book freshness and odds drift checks existed, but not Hunter's exact quote freshness discipline. | Discovery cache, authenticated quote, explicit final recheck. | Merged on execution path: initial logged-in quote plus final pre-fire recheck. |
 | FD soft validation | No authenticated FD pre-fire refresh in live execution. | Authenticated FD market-price refresh before soft-leg risk. | Merged core behavior via `validate_soft` using the logged-in FD adapter. |
@@ -90,6 +90,55 @@ What was left out:
 Recommendation:
 
 - Keep this. It is the foundation for every safe Pinnacle-backed fire.
+
+### Authenticated Pinnacle Odds Scanning
+
+Files:
+
+- `engine/src/odds_fetcher.rs`
+- `bet-placer/index.js`
+- `bet-placer/src/sportsbooks/pinnacle.js`
+
+What our engine previously did:
+
+- Rust scanned Pinnacle through the public guest Arcadia endpoints.
+- Authenticated Pinnacle was only binding later, during quote/pre-fire
+  execution checks.
+- Live testing showed the guest feed could keep presenting stale prices after
+  the logged-in account no longer had that executable line.
+
+What was merged:
+
+- Rust now defaults to `PIN_ODDS_SOURCE=auth`.
+- In authenticated mode, Rust calls the local bet-placer HTTP bridge at
+  `GET /pinnacle/snapshot/{leagueId}` on `PIN_AUTH_ODDS_BASE_URL`, default
+  `http://127.0.0.1:3404`.
+- The bet placer reuses the single logged-in Pinnacle browser session and
+  fetches `matchups` plus `markets/straight` from
+  `https://api.arcadia.pinnacle.com/0.1`.
+- The previous guest scan remains available only with `PIN_ODDS_SOURCE=guest`
+  or `PIN_ODDS_SOURCE=public`.
+- Authenticated scan failures do not silently fall back to guest prices.
+
+How this changes our process:
+
+- The engine no longer discovers Pinnacle-backed arbs from the stale guest feed
+  by default.
+- Normal scan/paper mode now needs the bet placer running and Pinnacle logged in
+  if we want Pinnacle-backed candidates.
+- The old guest path is still reversible while we test the authenticated scan
+  latency and reliability.
+
+What was left out:
+
+- No second Pinnacle browser.
+- No guest/auth reconciliation layer.
+- No automatic fallback from authenticated scan to guest scan.
+
+Recommendation:
+
+- Keep this default during live testing. Remove the guest scan entirely later if
+  authenticated scanning proves stable and the codebase can be made leaner.
 
 ### DK / FD Soft Pre-Fire Validation
 

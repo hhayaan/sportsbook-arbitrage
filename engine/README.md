@@ -1,16 +1,17 @@
-# Arb Engine V5
+# Arb Engine
 
-Rust scanning, arbitrage detection, safety filtering, stake sizing, persistence, and API layer for the local sportsbook arbitrage bot.
+Rust scanning, arbitrage detection, safety filtering, stake sizing, recovery orchestration, persistence, and API layer for the local sportsbook arbitrage bot.
 
-V5 is a local multi-process system:
+The current runtime is a local multi-process system:
 
 ```text
 Rust Engine (port 3401)
-  - polls public odds APIs every 5 seconds
+  - polls odds APIs every 5 seconds
   - normalizes markets into one canonical shape
   - maintains an in-memory order book
   - detects cross-venue arbitrage
   - applies safety filters and stake sizing
+  - orchestrates live recovery/cashout/naked-leg monitoring
   - persists balances, trades, settings, and arb logs to SQLite
   - exposes REST and WebSocket APIs
 
@@ -19,6 +20,7 @@ Bet Placer (Node.js, port 3402)
   - keeps authenticated browser sessions alive
   - receives quote/place/balance commands over WebSocket
   - places live bets through sportsbook adapters
+  - exposes authenticated Pinnacle odds snapshots on port 3404
 
 DK Proxy (Node.js, port 3403)
   - forwards DraftKings public odds API requests
@@ -37,14 +39,15 @@ and treats `sigma < 1.0` as a candidate guaranteed-profit opportunity.
 
 The engine is designed to:
 
-1. Fetch and normalize odds from public sportsbook endpoints.
+1. Fetch and normalize odds from sportsbook endpoints.
 2. Keep a fresh in-memory book with 30-second expiry.
 3. Detect valid cross-venue arbitrage candidates.
 4. Block known fake arbs from market mismatches.
 5. Size stakes against configured stake limits and current venue balances.
 6. Execute trades in paper mode or live mode through the Node bet placer.
 7. Persist operational history in SQLite.
-8. Expose REST and WebSocket APIs for status, settings, balances, and trade history.
+8. Persist per-attempt telemetry and unresolved naked-leg exposure.
+9. Expose REST and WebSocket APIs for status, settings, balances, and trade history.
 
 ## Current Architecture
 
@@ -72,6 +75,12 @@ The engine is designed to:
                     | dk-proxy.js                  |
                     | HTTP: localhost:3403         |
                     +------------------------------+
+
+                    +------------------------------+
+                    | Auth PIN Odds Bridge         |
+                    | bet-placer/index.js          |
+                    | HTTP: localhost:3404         |
+                    +------------------------------+
 ```
 
 ## Main Engine Modules
@@ -84,9 +93,13 @@ The engine is designed to:
 | `team_names.rs` | Team, selection, event ID, and player name normalization |
 | `models.rs` | Canonical market model, order book, arb/trade/settings/API event models |
 | `arb_detector.rs` | Sigma detection, complementarity checks, Pinnacle requirement, market mismatch filters |
-| `stake_optimizer.rs` | Balance-aware stake sizing and scaling |
+| `stake_optimizer.rs` | Balance-aware stake sizing, with `MAX_STAKE` applied to soft-book legs |
 | `paper_executor.rs` | Simulated execution and balance updates |
-| `live_executor.rs` | WebSocket connection to bet placer, quote flow, live two-leg execution |
+| `live_executor.rs` | WebSocket connection to bet placer, quote flow, live two-leg execution, recovery/cashout/naked-leg monitor |
+| `execution_math.rs` | Authenticated Pinnacle quote validation and actual-fill hedge math |
+| `attempt_telemetry.rs` | JSONL event and per-attempt telemetry |
+| `naked_legs.rs` | Durable unresolved exposure ledger |
+| `pin_yank.rs` | Temporary hard-yank blacklist for unavailable Pinnacle markets |
 | `odds_verifier.rs` | Pre-execution odds drift checks |
 | `circuit_breaker.rs` | Rolling loss and rejection breaker |
 | `rate_limiter.rs` | Per-venue one-hour sliding bet window |
@@ -94,9 +107,9 @@ The engine is designed to:
 | `api.rs` | REST handlers and `/ws` upgrade |
 | `ws.rs` | Broadcast channel for realtime client events |
 
-The following modules exist but are not wired into the current live execution path: `rescue_hedger.rs`, `treasury.rs`, `state_machine.rs`, `policy.rs`, and `trades.rs`.
+The following modules exist but are not wired into the current primary execution path: `treasury.rs`, `state_machine.rs`, `policy.rs`, and `trades.rs`. `rescue_hedger.rs` is an older standalone calculator; live recovery now lives mainly in `live_executor.rs` plus `execution_math.rs`.
 
-## Running V5
+## Running
 
 ### Prerequisites
 
@@ -116,7 +129,7 @@ cargo build
 
 ### Paper Mode
 
-Paper mode scans odds and simulates trades. The DK proxy should still be running so DraftKings odds can be fetched reliably on Windows.
+Paper mode scans odds and simulates trades. The DK proxy should still be running so DraftKings odds can be fetched reliably on Windows. By default, Pinnacle scanning also needs the bet placer running and Pinnacle logged in because `PIN_ODDS_SOURCE` defaults to authenticated odds.
 
 ```powershell
 # Terminal 1
@@ -124,8 +137,18 @@ cd C:\dev\sportsbook-arbitrage
 node dk-proxy.js
 
 # Terminal 2
+cd C:\dev\sportsbook-arbitrage\bet-placer
+node index.js
+
+# Terminal 3
 cd C:\dev\sportsbook-arbitrage\engine
 cargo run
+```
+
+To intentionally use the older public guest Pinnacle feed instead:
+
+```powershell
+$env:PIN_ODDS_SOURCE="guest"
 ```
 
 ### Live Mode
@@ -154,8 +177,8 @@ Then start the engine:
 # Terminal 3
 cd C:\dev\sportsbook-arbitrage\engine
 $env:LIVE_MODE="1"
-$env:FIXED_STAKE="1"
-$env:MAX_STAKE="2"
+$env:FIXED_STAKE="5"
+$env:MAX_STAKE="5"
 $env:MIN_ARB_PCT="0.5"
 cargo run
 ```
@@ -168,15 +191,21 @@ Most active settings come from SQLite and environment variables at startup. `eng
 | --- | --- | --- |
 | `LIVE_MODE` | `0` | `1` uses real bet placement through the bet placer; otherwise paper mode |
 | `FIXED_STAKE` | `25` | Per-leg stake in fixed mode |
-| `MAX_STAKE` | `50` | Max stake per leg |
+| `MAX_STAKE` | `50` | Max non-Pinnacle soft-book stake; Pinnacle hedge is quote/balance/profit bounded |
 | `MIN_ARB_PCT` | `0.5` | Minimum arb percent required for execution |
 | `STAKE_MODE` | `fixed` | `fixed` or `proportional` |
 | `PROPORTIONAL_PCT` | `5` | Percent of smaller venue balance used in proportional mode |
 | `ENABLED` | `true` | `false` scans/logs but does not execute |
 | `MAX_HOURS_TO_START` | `24` | Skip pre-game events farther out than this |
 | `BALANCE_REFRESH_CYCLES` | `60` | Periodic live balance refresh interval in poll cycles |
+| `NAKED_LEG_MONITOR_CYCLES` | `10` | Naked-leg recovery monitor interval in poll cycles |
 | `SKIP_LIVE` | `0` | `1` skips all live/in-play candidates |
+| `ODDS_FETCH_TIMEOUT_MS` | `2500` | Per-request odds fetch deadline for DK/FD/PIN scanning |
 | `WS_URL` | `ws://127.0.0.1:3402` | Bet placer WebSocket URL |
+| `PIN_ODDS_SOURCE` | `auth` | `auth`/`authenticated`/`logged-in`, or `guest`/`public` for the old guest feed |
+| `PIN_AUTH_ODDS_BASE_URL` | `http://127.0.0.1:3404` | Local authenticated Pinnacle odds bridge |
+
+The DraftKings proxy also supports `DK_PROXY_FETCH_TIMEOUT_MS`, default `2500`, for its upstream request to DraftKings.
 
 Hardcoded runtime values to know:
 
@@ -220,13 +249,14 @@ Live execution in `live_executor.rs` is sequential:
 1. Size the trade with current DB balances.
 2. If Pinnacle is involved, quote Pinnacle first.
 3. Recalculate sigma with quoted Pinnacle price.
-4. Adjust stakes for Pinnacle min/max stake if needed.
-5. Place the soft-book leg first.
-6. Recalculate sigma after leg 1 fills.
-7. Place Pinnacle second.
-8. Persist a trade record and update balances.
+4. Validate the soft-book price through DraftKings/FanDuel authenticated APIs.
+5. Recheck Pinnacle immediately before soft-leg risk.
+6. Place the soft-book leg first.
+7. Recalculate Pinnacle hedge from the actual soft fill.
+8. Place Pinnacle second.
+9. Persist a trade record and update balances.
 
-If leg 1 fails, leg 2 is not placed. If leg 2 fails after leg 1 fills, the engine logs one-sided exposure. Rescue hedge computation exists but is not currently wired into live execution.
+If leg 1 fails, leg 2 is not placed. If leg 2 fails after leg 1 fills, the engine enters recovery: original/adjacent Pinnacle rescue quotes, DK/FD cashout comparison/execution where available, and naked-leg persistence if unresolved.
 
 ## REST API
 
@@ -286,13 +316,11 @@ NBA, NHL, MLB, NFL, NCAAB, NCAAF, soccer through FanDuel event type, EPL, La Lig
 
 ## Current Gaps
 
-- `cargo check` passes, but `cargo test` currently fails to compile because test fixtures are stale after model changes.
+- `cargo check` and `cargo test` pass, but warnings remain from unused legacy/helper modules.
 - No JavaScript test runner is configured.
-- Rescue hedging is implemented but not wired into live execution.
 - Treasury/reservation accounting exists but is unused.
 - State machine and structured trade logging exist but are unused.
 - No WebSocket reconnect loop from engine to bet placer.
-- No alerting for one-sided exposure.
 - No settlement reconciliation or actual realized P&L tracking.
 - FanDuel balance reading is DOM-scraped and fragile.
 - DraftKings wager client version headers are hardcoded.

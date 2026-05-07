@@ -1,19 +1,21 @@
-# Troubleshooting (V5 Current State)
+# Troubleshooting (Current State)
 
-This document records current V5 operational issues plus historical fixes that should remain part of the project memory.
+This document records current operational issues plus historical fixes that should remain part of the project memory.
 
-## Current V5 Status Snapshot
+## Current Status Snapshot
 
 Known current state:
 
 - Rust engine serves REST and dashboard WebSocket on `0.0.0.0:3401`.
 - DraftKings proxy listens on `localhost:3403`.
 - Bet placer listens on `localhost:3402`.
+- Bet placer also exposes authenticated Pinnacle odds snapshots on `localhost:3404`.
 - SQLite is opened at `data/trades.db` relative to the engine process working directory.
 - Live execution requires an engine startup connection to the bet placer.
+- Default Pinnacle scanning requires the bet placer HTTP bridge and a logged-in Pinnacle browser. The old guest feed is opt-in with `PIN_ODDS_SOURCE=guest`.
 - Odds drift gate is currently 5% per leg in `main.rs`.
 - `engine/config.toml` is stale and not the authoritative runtime configuration.
-- `cargo check` is the useful compile-health command; `cargo test` currently has stale tests/fixtures.
+- `cargo check` and `cargo test` pass, with warnings from unused legacy/helper modules.
 
 ## Startup Checklist
 
@@ -23,6 +25,13 @@ Use this order for paper mode:
 cd C:\dev\sportsbook-arbitrage
 node .\dk-proxy.js
 ```
+
+```powershell
+cd C:\dev\sportsbook-arbitrage\bet-placer
+npm start
+```
+
+Log in to Pinnacle if using the default authenticated Pinnacle odds source. To use the older guest Pinnacle feed instead, set `$env:PIN_ODDS_SOURCE = "guest"` before starting the engine.
 
 ```powershell
 cd C:\dev\sportsbook-arbitrage\engine
@@ -74,6 +83,8 @@ Expected behavior:
 
 - The proxy returns JSON for NBA when the public DK endpoint is healthy.
 - The proxy logs a `/dk/{leagueId}` request.
+- Slow or dead DraftKings leagues should now fail around `ODDS_FETCH_TIMEOUT_MS`, default `2500`, instead of holding the whole Rust poll cycle for 15 seconds.
+- The proxy also aborts its upstream DraftKings fetch after `DK_PROXY_FETCH_TIMEOUT_MS`, default `2500`.
 
 Notes:
 
@@ -89,6 +100,7 @@ Likely causes:
 - Bet placer was not running before engine startup.
 - Engine failed initial WebSocket connection and fell back to paper execution.
 - Sportsbook browser sessions are logged out or geo/session tokens are stale.
+- Default Pinnacle scanning cannot reach the bet placer's `3404` HTTP bridge.
 
 Checks:
 
@@ -115,39 +127,50 @@ Current live execution places one leg first and then the second leg. It reduces 
 
 - placing the softer book first when Pinnacle is involved,
 - quoting Pinnacle before either leg is placed,
+- validating DK/FD before soft-leg risk,
+- rechecking Pinnacle immediately before the soft leg is sent,
 - rechecking sigma after leg 1 fills.
+
+Current recovery behavior:
+
+- If leg 2 rejects or post-fill math kills the hedge, runtime enters recovery.
+- Recovery can quote original/adjacent Pinnacle markets, compare cashout offer versus rescue loss, attempt DK/FD cashout, and persist unresolved exposure to `data/naked-legs.json`.
+- The monitor reloads naked legs after restart and periodically tries status/cashout/relist recovery.
 
 Remaining gap:
 
-- If leg 2 rejects or errors after leg 1 fills, the runtime logs exposure and returns.
-- `rescue_hedger.rs` can compute a rescue hedge, but it is not wired into `live_executor.rs`.
+- Settlement ingest and the full Hunter cashout retry schedule are not merged yet.
+- Manual monitoring is still required during live-money tests.
 
 Response:
 
-- Watch live logs during any real-money run.
-- Keep `FIXED_STAKE` and `MAX_STAKE` small while testing.
+- Watch live logs and `data/bets/<attempt_id>.jsonl` during any real-money run.
+- Keep `FIXED_STAKE` and `MAX_STAKE` small while testing. `MAX_STAKE` caps the soft-book side only; Pinnacle hedge size is quote/balance/profit bounded.
 - Be prepared to manually hedge on the opposite outcome.
 
-## Cargo Test Fails
+## Cargo Test And Warnings
 
 Current known issue:
 
 - `cargo check` passes.
-- `cargo test` contains stale unit tests/fixtures from older assumptions.
+- `cargo test` passes.
+- The crate still emits warnings from unused legacy/helper modules.
 
-Examples of stale assumptions:
+Current expected warnings include:
 
-- Event ID tests still expect date-only IDs even though `extract_date` now includes hour when available.
-- Some odds verifier tests still pass `0.03` thresholds while runtime uses a 5% drift gate in `main.rs`.
+- unused legacy helpers in `trades.rs`, `treasury.rs`, `state_machine.rs`, and `policy.rs`;
+- unused model fields retained for API/model compatibility;
+- older player-prop helpers that are not in current market scope.
 
 Until tests are refreshed, use:
 
 ```powershell
 cd C:\dev\sportsbook-arbitrage\engine
 cargo check
+cargo test
 ```
 
-Do not treat the current full test suite as an accurate V5 behavioral spec.
+Treat tests as compile/unit health, not as a complete replay suite for live sportsbook incidents.
 
 ## `engine/config.toml` Disagrees with Runtime
 
@@ -220,15 +243,39 @@ Symptoms:
 Checks:
 
 - Pinnacle browser is open and logged in.
-- `localStorage["Main:User"]` contains a device ID and session token.
+- The bet placer terminal reports a Pinnacle token source, commonly `localStorage:Main:User`.
+- Browser storage contains a device ID and session token in one of the adapter's searched auth objects.
 - The event/market still exists.
 - `venue_market_id` is in `{matchupId}:{marketKey}:{designation}` form.
 
 Current flow:
 
 - The bet placer uses direct Node `fetch`, not Patchright `context.request`, for Pinnacle betting.
-- Tokens refresh at most every 5 minutes unless missing.
+- Tokens are refreshed from the browser before each Pinnacle API request.
 - A failed Pinnacle quote skips the arb before any leg is placed.
+
+## Pinnacle Auth Odds Fail Or Look Stale
+
+Symptoms:
+
+- Logs show `[PIN] ... fetch failed` while `pin_odds_source=auth` appears in the startup settings.
+- No Pinnacle-backed candidates appear.
+- You see old guest-source behavior after expecting authenticated odds.
+
+Checks:
+
+- Bet placer is running and printed `[PIN-ODDS] Listening on http://localhost:3404`.
+- Pinnacle browser is logged in at `https://www.pinnacle.ca`.
+- `PIN_ODDS_SOURCE` is unset or set to `auth`, `authenticated`, `logged-in`, or `logged_in`.
+- `PIN_AUTH_ODDS_BASE_URL` points to the right local bridge if you changed `PIN_ODDS_PORT`.
+
+Intentional guest fallback:
+
+```powershell
+$env:PIN_ODDS_SOURCE = "guest"
+```
+
+Do not use guest mode for live testing unless you explicitly want to compare behavior; guest Pinnacle prices have shown stale lines during testing.
 
 ## DraftKings Placement Fails
 
@@ -254,7 +301,7 @@ DraftKings placement uses browser-page `fetch` with credentials included. If DK 
 Common causes:
 
 - Auth token missing from `session-sportsbook`.
-- Geo packet missing from `location_token`.
+- Geo packet missing from `geolocation_document.jwt`; `location_token.jwt` is only a legacy fallback.
 - PX cookies missing or expired.
 - `implyBets` returns a non-success response.
 - Market selection ID no longer maps to a current runner.
@@ -365,6 +412,7 @@ Ports:
 3401 Rust REST/dashboard WebSocket
 3402 Node bet placer WebSocket
 3403 DraftKings public odds proxy
+3404 Bet placer authenticated Pinnacle odds bridge
 ```
 
 Key URLs:
@@ -377,6 +425,8 @@ http://localhost:3401/api/settings
 ws://localhost:3401/ws
 ws://localhost:3402
 http://localhost:3403/dk/42648
+http://localhost:3404/health
+http://localhost:3404/pinnacle/snapshot/246
 ```
 
 Low-stake live test environment:
@@ -384,8 +434,8 @@ Low-stake live test environment:
 ```powershell
 cd C:\dev\sportsbook-arbitrage\engine
 $env:LIVE_MODE = "1"
-$env:FIXED_STAKE = "1"
-$env:MAX_STAKE = "1"
+$env:FIXED_STAKE = "5"
+$env:MAX_STAKE = "5"
 $env:MIN_ARB_PCT = "0.5"
 $env:SKIP_LIVE = "1"
 cargo run --bin arb-engine
