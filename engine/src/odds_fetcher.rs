@@ -123,7 +123,7 @@ pub async fn fetch_all(client: &Client) -> Vec<CanonicalMarket> {
             handles.push(tokio::spawn(async move {
                 match fetch_draftkings(&c, name, dk_id).await {
                     Ok(markets) => {
-                        tracing::info!("[DK]    {:<10} → {} markets", name, markets.len());
+                        tracing::info!("[DK]  {:<10} → {} markets", name, markets.len());
                         markets
                     }
                     Err(e) => {
@@ -141,7 +141,7 @@ pub async fn fetch_all(client: &Client) -> Vec<CanonicalMarket> {
             handles.push(tokio::spawn(async move {
                 match fetch_fanduel(&c, name, page).await {
                     Ok(markets) => {
-                        tracing::info!("[FD]    {:<10} → {} markets", name, markets.len());
+                        tracing::info!("[FD]  {:<10} → {} markets", name, markets.len());
                         markets
                     }
                     Err(e) => {
@@ -156,7 +156,7 @@ pub async fn fetch_all(client: &Client) -> Vec<CanonicalMarket> {
             handles.push(tokio::spawn(async move {
                 match fetch_fanduel_by_event_type(&c, name, event_type_id).await {
                     Ok(markets) => {
-                        tracing::info!("[FD]    {:<10} → {} markets", name, markets.len());
+                        tracing::info!("[FD]  {:<10} → {} markets", name, markets.len());
                         markets
                     }
                     Err(e) => {
@@ -176,7 +176,7 @@ pub async fn fetch_all(client: &Client) -> Vec<CanonicalMarket> {
                 match fetch_pinnacle(&c, name, league_id, source).await {
                     Ok(markets) => {
                         tracing::info!(
-                            "[{}]   {:<10} → {} markets",
+                            "[{}] {:<10} → {} markets",
                             source.log_label(),
                             name,
                             markets.len()
