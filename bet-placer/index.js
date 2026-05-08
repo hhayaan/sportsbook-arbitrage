@@ -15,6 +15,14 @@ const WS_PORT = parseInt(process.env.WS_PORT || "3402", 10);
 const PIN_ODDS_PORT = parseInt(process.env.PIN_ODDS_PORT || "3404", 10);
 const KEEPALIVE_INTERVAL_MS = 5 * 60 * 1000;
 
+function firstPresent(...values) {
+  return values.find((value) => value !== undefined && value !== null) ?? null;
+}
+
+function idToString(value) {
+  return value === undefined || value === null ? null : String(value);
+}
+
 async function main() {
   console.log("╔═══════════════════════════════════════════════════════════╗");
   console.log("║   ARB BET PLACER — Patchright + WebSocket Bridge         ║");
@@ -343,21 +351,21 @@ async function main() {
         accepted_stake: stake,
         accepted_odds: acceptedOdds,
         error_message: null,
-        purchase_id:
-          result?._purchaseId ||
-          result?.purchaseId ||
-          result?.id ||
-          bet?.purchaseId ||
-          bet?.purchase_id ||
-          null,
-        bet_id:
-          result?._betId ||
-          result?.betId ||
-          result?.bets?.[0]?.betId ||
-          bet?.betId ||
-          bet?.id ||
-          bet?.receiptId ||
-          null,
+        purchase_id: idToString(firstPresent(
+          result?._purchaseId,
+          result?.purchaseId,
+          result?.id,
+          bet?.purchaseId,
+          bet?.purchase_id,
+        )),
+        bet_id: idToString(firstPresent(
+          result?._betId,
+          result?.betId,
+          result?.bets?.[0]?.betId,
+          bet?.betId,
+          bet?.id,
+          bet?.receiptId,
+        )),
       };
 
       console.log(`[BET] ${attempt_id} FILLED | ${venue} | $${stake} @ ${acceptedOdds.toFixed(3)}`);

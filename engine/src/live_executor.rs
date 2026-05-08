@@ -8,7 +8,7 @@ use crate::stake_optimizer;
 use crate::status_classifier::{classify_cashout_confirmation, CashoutConfirmation};
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::net::TcpStream;
@@ -45,7 +45,9 @@ pub struct FillReport {
     pub accepted_stake: Option<f64>,
     pub accepted_odds: Option<f64>,
     pub error_message: Option<String>,
+    #[serde(default, deserialize_with = "optional_id_string")]
     pub purchase_id: Option<String>,
+    #[serde(default, deserialize_with = "optional_id_string")]
     pub bet_id: Option<String>,
     pub raw_status: Option<String>,
     pub reconciliation_hint: Option<String>,
@@ -104,7 +106,9 @@ struct BetStatusResult {
     attempt_id: Option<String>,
     venue: Option<String>,
     status: Option<String>,
+    #[serde(default, deserialize_with = "optional_id_string")]
     purchase_id: Option<String>,
+    #[serde(default, deserialize_with = "optional_id_string")]
     bet_id: Option<String>,
     raw_status: Option<String>,
     settled_at: Option<String>,
@@ -129,6 +133,21 @@ struct CashoutResult {
     raw_status: Option<String>,
     reason: Option<String>,
     error: Option<String>,
+}
+
+fn optional_id_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s)),
+        Some(Value::Number(n)) => Ok(Some(n.to_string())),
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "expected string or numeric id, got {other}"
+        ))),
+    }
 }
 
 enum PinPrefireDecision {
@@ -2018,7 +2037,7 @@ pub async fn try_execute(
 
 #[cfg(test)]
 mod tests {
-    use super::build_pin_rescue_market_ids;
+    use super::{build_pin_rescue_market_ids, BetStatusResult, FillReport};
 
     #[test]
     fn rescue_market_ids_expand_totals() {
@@ -2039,5 +2058,42 @@ mod tests {
     fn rescue_market_ids_keep_moneyline_to_original() {
         let ids = build_pin_rescue_market_ids("1627197304:s;0;m:home");
         assert_eq!(ids, vec!["1627197304:s;0;m:home".to_string()]);
+    }
+
+    #[test]
+    fn fill_report_accepts_numeric_pinnacle_bet_id() {
+        let raw = r#"{
+            "type": "fill_report",
+            "attempt_id": "6683e2e7-e0d7-47c1-ac81-28c4398be5e8-L2",
+            "status": "filled",
+            "accepted_stake": 2.52,
+            "accepted_odds": 4.11,
+            "error_message": null,
+            "purchase_id": null,
+            "bet_id": 2232298295
+        }"#;
+
+        let fill: FillReport = serde_json::from_str(raw).expect("numeric bet_id should parse");
+        assert_eq!(fill.bet_id.as_deref(), Some("2232298295"));
+        assert_eq!(
+            fill.attempt_id,
+            "6683e2e7-e0d7-47c1-ac81-28c4398be5e8-L2"
+        );
+    }
+
+    #[test]
+    fn bet_status_accepts_numeric_ids() {
+        let raw = r#"{
+            "type": "bet_status",
+            "attempt_id": "status-check",
+            "venue": "pinnacle",
+            "purchase_id": 12345,
+            "bet_id": 67890,
+            "status": "open"
+        }"#;
+
+        let status: BetStatusResult = serde_json::from_str(raw).expect("numeric ids should parse");
+        assert_eq!(status.purchase_id.as_deref(), Some("12345"));
+        assert_eq!(status.bet_id.as_deref(), Some("67890"));
     }
 }

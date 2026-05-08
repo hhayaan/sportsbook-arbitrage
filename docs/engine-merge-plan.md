@@ -1,518 +1,280 @@
 # Engine Merge Plan
 
-This file tracks the merge from the partner Hunter engine into our Rust engine.
-Hunter is the empirical behavior source. Our project remains the target runtime:
-pure Rust engine logic, terminal-first operation, and current market scope only.
+This file is the current merge status for bringing selected Hunter engine behavior into this Rust-first project. It is not a changelog. It describes what the engine includes now, what is next, and what is intentionally out.
 
 ## Guardrails
 
-- Keep the engine pure Rust. Browser/API automation stays in `bet-placer` as an
-  adapter bridge only.
-- Keep the operator surface in terminal output and existing logs. Do not port a
-  GUI or frontend.
-- Keep current market scope to moneyline, totals, and spreads.
-- Do not port player props in this wave.
-- Optimize for live latency. Extra safety checks must be bounded by short
-  timeouts and must not add a second Pinnacle browser.
-- Dedup / family / ladder behavior is the only planned second-phase merge item.
+- Engine logic stays in Rust.
+- Browser/session/API automation stays in `bet-placer` as an adapter bridge.
+- Operator surface stays terminal-first with JSONL telemetry for incident review.
+- Live market scope is moneyline, totals, and spreads.
+- Player props, broad alternate markets, and frontend/UI surfaces are out.
+- Live latency matters. Safety checks must have short timeouts and must reuse the existing logged-in sportsbook sessions.
+- There is only one Pinnacle browser context, logged in by the user.
 
-## Difference Inventory
+## Current Difference Inventory
 
-| Area | Our Rust engine before merge | Hunter engine | Current merge status |
-|---|---|---|---|
-| Runtime role | Rust was a maintainable engine foundation, but not equivalent to Hunter's latest production behavior. | `hunter.js` is the partner project's production runtime and carries recent incident fixes. | Hunter remains the behavior spec; Rust remains our runtime. |
-| Implementation shape | Typed Rust modules with clearer boundaries. | Large JavaScript monolith with many coupled state maps. | Keep Rust modules; do not port the monolith. |
-| Core model | Canonical order book using `CanonicalMarket`, `MarketIdentityKey`, and generic cross-venue detection. | Tactical DK/FD soft book against Pinnacle hedge scanner. | Keep Rust's canonical model. Main live loop still requires a Pinnacle leg. |
-| Detection scope | Can theoretically detect DK/FD/PIN combinations, but production path already requires Pinnacle. | Production fire path is soft book first, Pinnacle hedge second. | Kept. No DK-vs-FD live expansion. |
-| Market scope | Moneyline, spread, total fields, plus model capacity for props/other surfaces. | Broader canary surfaces, player props, alts, and period experiments. | Keep ML/spreads/totals only. Props and broad surfaces are unplanned. |
-| Public Pinnacle odds | Public/book Pinnacle prices could influence candidate math before live execution. | Public/guest PIN is discovery only; logged-in quote is executable truth. | Merged for execution, then upgraded for scanning: authenticated PIN is now default and guest is behind `PIN_ODDS_SOURCE=guest`. |
-| Authenticated Pinnacle quote | Existing `quote_bet` was present but not fully binding for stake math. | Logged-in quote price/min/max is the hedge truth. | Merged. |
-| Quote freshness model | Book freshness and odds drift checks existed, but not Hunter's exact quote freshness discipline. | Discovery cache, authenticated quote, explicit final recheck. | Merged on execution path: initial logged-in quote plus final pre-fire recheck. |
-| FD soft validation | No authenticated FD pre-fire refresh in live execution. | Authenticated FD market-price refresh before soft-leg risk. | Merged core behavior via `validate_soft` using the logged-in FD adapter. |
-| DK soft validation | No `validate_soft` pre-fire DK calculate pass. | DK calculate/prepare validation catches stale CDN/feed prices. | Merged core authenticated price check. Hunter's NewOffer filled-leg handoff is not fully ported. |
-| PIN pre-fire recheck | Only initial pre-flight quote. | Re-quotes PIN immediately before `LEG1_SENT`; offline/arb-dead aborts, timeout can fail open. | Merged with `PIN_PREFIRE_RECHECK_TIMEOUT_MS`, default 1500ms. |
-| PIN hard-yank blacklist | No temporary memory for PIN 410/404/OFFLINE. | TTL blacklist by matchup/period/family plus umbrella cooldowns. | Partially merged as a market-id TTL blacklist. Family/umbrella behavior is not merged. |
-| Execution ordering | Soft book first and Pinnacle second. | Soft-first only after quote, soft validation, and PIN pre-fire checks. | Merged for Pinnacle-backed live execution. |
-| Attempt lifecycle | Mostly implicit in tracing and return paths. | Structured attempt lifecycle stages. | Merged as JSONL event files while keeping terminal output. |
-| Post-fill hedge math | Could rely on planned stake/odds farther into the path. | Recompute hedge from actual filled soft stake and odds. | Merged. |
-| Post-rounding profitability | Stake math was less isolated from quote bounds. | Uses quote min/max and rounded stake viability before firing. | Merged in `execution_math` and live executor checks. |
-| Rescue sizing | Rescue module previously used profit-based sizing. | Rescue stake balances payouts: `leg1_stake * leg1_odds / rescue_odds`. | Merged. |
-| Adjacent-line rescue | No live PIN adjacent-line rescue path. | Tries original PIN line, then adjacent totals/spreads/team totals. | Merged for PIN market IDs. |
-| N-miss PIN 410 rescue threshold | No rescue-specific hard-yank counter. | A single 410 does not kill the rescue family; default threshold is 3. | Merged with `RESCUE_PIN_HARD_YANK_THRESHOLD`, default 3. |
-| Cashout comparison | No rescue-vs-cashout economics. | Skip a hedge when available cashout locks a smaller loss. | Merged when DK/FD adapter status exposes a cashout offer. |
-| Cashout execution | No Rust recovery cashout flow. | Attempts cashout after failed rescue, then confirms status. | Merged for DK and FD adapter paths. |
-| Cashout confirmation | No raw DK cashout confirmation state machine. | Raw `Cashed Out` is required for DK; FD `cashoutBet` success confirms FD cashout. | Merged for Rust classifier, DK bridge handling, and FD confirmed cashout result. |
-| Raw DK status classification | No Rust classifier. | Open-first word-boundary classifier avoids the `Unsettled` trap. | Merged with tests. |
-| Naked-leg persistence | No durable unresolved-exposure ledger. | Writes naked legs and reloads them after restart. | Merged as `data/naked-legs.json`. |
-| Naked-leg monitor | No periodic recovery monitor. | Polls status/cashout and keeps exposure alive until resolved. | Merged in Rust polling loop. |
-| PIN relist recovery | No relist watcher. | Recovery-only watcher quotes PIN again for existing naked legs. | Merged for original PIN market relist. |
-| Settlement ingest | Simpler trade history/accounting. | Separate settlement ingest and MyBets fallback hardening. | Not merged. |
-| Dedup/family/ladder | Basic time dedup only. | Family-scope dedup plus ladder allowlist. | Shelved for next merge phase. |
-| Period identity | Rust has period in canonical identity. | Hunter preserves period suffixes in family/ladder keys and gates broad period surfaces. | Existing Rust identity retained; Hunter ladder period behavior shelved with dedup. |
-| Telemetry | Tracing, SQLite records, dashboard events. | JSONL global events and per-attempt files. | Merged as `data/events.jsonl` and `data/bets/<attempt_id>.jsonl`. |
-| Replay fixtures | Unit tests existed, no Hunter replay harness. | Docs require incident replay fixtures. | Not merged except focused unit tests. |
-| Environment profile | Rust env/settings shape. | Heavy Hunter env profile. | Only feature-specific env gates were translated. |
-| Frontend/UI | Terminal-first engine operation. | Partner repo has broader operational surfaces. | Not planned. |
-| Player props | Out of current scope. | Hunter has prop scan/canary work. | Not planned. |
-| Hunter weaknesses | Rust avoids monolith/state-map risks. | Hunter has state coupling, env dependence, and difficult-to-audit control flow. | Do not port those qualities. |
+| Area | Current Rust project status | Hunter capability or difference | Decision |
+| --- | --- | --- | --- |
+| Runtime shape | Rust engine plus Node adapters. | Hunter is a larger JavaScript runtime. | Keep Rust engine structure; do not port the monolith. |
+| Operator surface | Terminal logs, REST/dashboard API, JSONL telemetry. | Hunter has broader operational surfaces. | Keep terminal-first operation. |
+| Market scope | Moneyline, totals, spreads. | Hunter includes props, alts, and wider period experiments. | Keep current scope. |
+| Pinnacle scan source | Authenticated Pinnacle odds are default through `PIN_ODDS_SOURCE=auth`. Guest scan is opt-in. | Hunter treats logged-in Pinnacle as executable truth. | Merged and keep. |
+| Pinnacle executable quote | `quote_bet` is binding for hedge price, min stake, max stake. | Hunter does not trust discovery odds for execution. | Merged and keep. |
+| Soft-book validation | DK/FD `validate_soft` runs before soft-leg risk. | Hunter refreshes soft odds from authenticated sessions before firing. | Merged and keep. |
+| Final Pinnacle recheck | Short pre-fire quote before sending the soft leg. | Hunter rechecks PIN immediately before soft risk. | Merged and keep. |
+| Stake sizing | `MAX_STAKE` caps only the soft-book stake in Pinnacle-backed arbs; Pinnacle hedge is quote, balance, and profit bounded. | Hunter sizes hedge from actual filled soft stake. | Merged and keep. |
+| Pinnacle fill parsing | Node normalizes `purchase_id` and `bet_id` to strings; Rust also accepts numeric IDs. | Hunter's PIN IDs are numeric in accepted responses. | Merged after live timeout evidence. |
+| DK status/cashout classifier | Rust has raw-status classification and DK bridge support. | Hunter fixed the `Unsettled` trap with raw open-first logic. | Merged and keep. |
+| FD cashout | FD open-bet lookup, fresh `cashOutToken`, browser-context cashout write, and geo JWT freshness are implemented. | Hunter has a larger FD cashout stack. | Scoped core merged; extra FD stack is out unless evidence requires it. |
+| Recovery | Original/adjacent Pinnacle rescue, cashout comparison, naked-leg persistence, monitor reload, and original-line relist recovery are wired. | Hunter has broader retry scheduling and settlement support. | First-wave core merged; retry schedule and settlement are not merged. |
+| Attempt telemetry | JSONL global and per-attempt events are written under `engine/data` by default. | Hunter has structured lifecycle telemetry. | Rust-native telemetry merged. |
+| Dedup/family/ladder | Current runtime has a basic 60-second event/market/venue-pair cooldown. | Hunter has family-scope dedup and ladder allowlists. | Only planned second-phase item. |
+| Pinnacle period handling | Source currently maps unknown Pinnacle periods to `full_game`. | Hunter preserves period suffixes in family/ladder keys. | Needs fix before higher-stake live use. |
+| Settlement ingest | SQLite records live trades, balances, arbs, and telemetry; no settlement reconciliation pipeline. | Hunter has more settlement/open-bet handling. | Not merged. |
+| Replay fixtures | Focused Rust unit tests exist; no incident replay harness. | Hunter migration docs call for replay fixtures. | Recommended later, not phase two. |
+| Unknown fill/manual reconciliation | Fill status is not allowed to become an operator-manual "unknown placed" state. | Hunter had an indeterminate-write path that could send `fill_report status="unknown"` with `retry_allowed=false`. | Not being merged. Automated filled/rejected/error truth is required. |
 
 ## Merged First Wave
 
-### Authenticated Pinnacle Quote Truth
+### Authenticated Pinnacle Odds And Quote Truth
 
-Files:
+Current behavior:
 
-- `engine/src/execution_math.rs`
-- `engine/src/live_executor.rs`
-- `bet-placer/index.js`
+- Rust defaults to `PIN_ODDS_SOURCE=auth`.
+- Rust calls `GET /pinnacle/snapshot/{leagueId}` on the bet-placer HTTP bridge, default `http://127.0.0.1:3404`.
+- The bet placer uses the single logged-in Pinnacle browser session to fetch Arcadia `matchups` and `markets/straight`.
+- Guest Pinnacle scanning remains available only with `PIN_ODDS_SOURCE=guest` or `PIN_ODDS_SOURCE=public`.
+- Before execution, Rust uses authenticated Pinnacle `quote_bet` as the hedge truth for price, min stake, and max stake.
 
-What our engine previously did:
+Left out:
 
-- It already called `quote_bet` for Pinnacle, but planned candidate odds and
-  stake math could still leak into execution.
-
-What was merged:
-
-- `AuthenticatedQuote` validates quote price, min stake, and max stake.
-- Live execution treats the logged-in Pinnacle quote as the binding hedge price.
-- PIN stake is computed from the soft-side payout and the authenticated quote.
-
-How this changes our process:
-
-- Public Pinnacle odds remain discovery only.
-- Before soft-leg risk, the engine checks the executable logged-in quote from
-  the single logged-in Pinnacle browser/API context.
-
-What was left out:
-
-- Hunter's broader family-level PIN quote caches and matchup umbrella cooldowns.
+- A second Pinnacle browser.
+- Guest/auth reconciliation.
+- Automatic fallback from auth scan to guest scan.
+- Hunter's family-level quote cache and umbrella cooldowns.
 
 Recommendation:
 
-- Keep this. It is the foundation for every safe Pinnacle-backed fire.
-
-### Authenticated Pinnacle Odds Scanning
-
-Files:
-
-- `engine/src/odds_fetcher.rs`
-- `bet-placer/index.js`
-- `bet-placer/src/sportsbooks/pinnacle.js`
-
-What our engine previously did:
-
-- Rust scanned Pinnacle through the public guest Arcadia endpoints.
-- Authenticated Pinnacle was only binding later, during quote/pre-fire
-  execution checks.
-- Live testing showed the guest feed could keep presenting stale prices after
-  the logged-in account no longer had that executable line.
-
-What was merged:
-
-- Rust now defaults to `PIN_ODDS_SOURCE=auth`.
-- In authenticated mode, Rust calls the local bet-placer HTTP bridge at
-  `GET /pinnacle/snapshot/{leagueId}` on `PIN_AUTH_ODDS_BASE_URL`, default
-  `http://127.0.0.1:3404`.
-- The bet placer reuses the single logged-in Pinnacle browser session and
-  fetches `matchups` plus `markets/straight` from
-  `https://api.arcadia.pinnacle.com/0.1`.
-- The previous guest scan remains available only with `PIN_ODDS_SOURCE=guest`
-  or `PIN_ODDS_SOURCE=public`.
-- Authenticated scan failures do not silently fall back to guest prices.
-
-How this changes our process:
-
-- The engine no longer discovers Pinnacle-backed arbs from the stale guest feed
-  by default.
-- Normal scan/paper mode now needs the bet placer running and Pinnacle logged in
-  if we want Pinnacle-backed candidates.
-- The old guest path is still reversible while we test the authenticated scan
-  latency and reliability.
-
-What was left out:
-
-- No second Pinnacle browser.
-- No guest/auth reconciliation layer.
-- No automatic fallback from authenticated scan to guest scan.
-
-Recommendation:
-
-- Keep this default during live testing. Remove the guest scan entirely later if
-  authenticated scanning proves stable and the codebase can be made leaner.
+- Keep authenticated scan as default.
+- Remove guest scan later if authenticated scan stays stable and a leaner codebase is preferred.
 
 ### DK / FD Soft Pre-Fire Validation
 
-Files:
+Current behavior:
 
-- `engine/src/live_executor.rs`
-- `bet-placer/index.js`
-
-What our engine previously did:
-
-- It trusted the scanned soft-book candidate price until placement.
-
-What was merged:
-
-- Rust sends `validate_soft` before soft-leg risk.
+- Rust sends `validate_soft` before risking a DK or FD soft leg.
 - DraftKings validation uses authenticated `calculateBets`.
-- FanDuel validation uses authenticated `getSelectionInfo`, which refreshes
-  market prices through the logged-in FD adapter.
-- Rust uses the fresh soft price for sigma checks and downstream PIN stake math.
+- FanDuel validation uses authenticated price refresh through `getSelectionInfo`.
+- Rust uses the fresh soft price for sigma checks and downstream hedge math.
 
-How this changes our process:
+Left out:
 
-- A stale DK/FD candidate can be killed before the soft bet is sent.
-- If the price is still live, the engine continues with the fresh soft odds.
-
-What was left out:
-
-- Hunter's full DK NewOffer / accepted-during-drift handoff semantics.
-- Hunter's richer retry taxonomy for validation failures.
+- DK NewOffer filled-leg handoff.
+- Large validation retry taxonomy.
 
 Recommendation:
 
-- Keep this core validation now. Add NewOffer handoff only after live testing
-  proves we need that edge case.
+- Keep the current bounded validation.
+- Add NewOffer handling only if live evidence shows DK accepts a bet at changed terms that the current fill path cannot represent.
 
-### PIN Pre-Fire Recheck
+### Pinnacle Pre-Fire Recheck
 
-Files:
+Current behavior:
 
-- `engine/src/live_executor.rs`
-- `engine/src/pin_yank.rs`
+- Rust sends a final short Pinnacle quote immediately before `LEG1_SENT`.
+- Default timeout is `PIN_PREFIRE_RECHECK_TIMEOUT_MS=1500`.
+- Hard-yank errors abort before soft risk and temporarily blacklist the exact Pinnacle market ID.
+- Timeout or unclassified transient failure fails open to avoid making live arbs too slow.
 
-What our engine previously did:
+Left out:
 
-- It quoted Pinnacle once earlier in the execution path.
-
-What was merged:
-
-- Rust re-quotes Pinnacle immediately before `LEG1_SENT`.
-- Default timeout is 1500ms via `PIN_PREFIRE_RECHECK_TIMEOUT_MS`.
-- `410`, `404`, `OFFLINE`, unavailable, suspended, and similar hard-yank errors
-  abort before soft risk and record a temporary PIN blacklist.
-- Timeout or unclassified transient failure fails open, matching Hunter's
-  latency/safety tradeoff.
-
-How this changes our process:
-
-- The last check before risking the soft leg asks whether Pinnacle is still
-  hedgeable right now.
-- It does not add another browser; it reuses the same logged-in Pinnacle quote
-  route.
-
-What was left out:
-
-- Hunter's family-scope hard-yank key and game umbrella cooldown.
+- Hunter's family-scope hard-yank key.
+- Matchup umbrella cooldown.
 
 Recommendation:
 
-- Keep the market-id blacklist for now. Revisit family-scope yank behavior when
-  dedup/family keys are merged.
+- Keep exact-market blacklist now.
+- Revisit family-level yank behavior with the dedup/family phase.
 
 ### Actual-Fill Hedge Math
 
-Files:
+Current behavior:
 
-- `engine/src/execution_math.rs`
-- `engine/src/live_executor.rs`
-
-What our engine previously did:
-
-- It could carry planned soft stake/odds into the hedge decision.
-
-What was merged:
-
-- After leg 1 fills, Rust recomputes:
+- After the soft leg fills, Rust recomputes the Pinnacle hedge from the filled soft stake and filled soft odds.
+- Hedge sizing uses:
 
 ```text
-pin_stake = soft_filled_stake * soft_filled_decimal_odds / pin_decimal_odds
+pin_stake = soft_filled_stake * soft_filled_decimal_odds / authenticated_pin_decimal_odds
 ```
 
-- The recompute uses the authenticated PIN quote and checks max stake, sigma,
-  and guaranteed profit before sending the hedge.
+- Rust checks quote max, Pinnacle balance, sigma, and guaranteed profit after rounding.
 
-How this changes our process:
+Left out:
 
-- Hedge size follows the bet that actually filled, not the planned bet.
-
-What was left out:
-
-- Nothing material for this feature.
+- Nothing material for this scope.
 
 Recommendation:
 
-- Keep this permanently.
+- Keep permanently.
+
+### Pinnacle Fill ID Normalization
+
+Current behavior:
+
+- The bet placer converts `purchase_id` and `bet_id` to strings in `fill_report`.
+- Rust also accepts numeric IDs for `fill_report` and `bet_status`.
+- This prevents an accepted Pinnacle bet with numeric `bet_id` from being ignored by Rust's JSON parser.
+
+Left out:
+
+- Hunter's indeterminate Pinnacle write response: `fill_report status="unknown"` with `retry_allowed=false`.
+- Manual "unknown fill" status.
+- Any operator-required reconciliation stop.
+
+Recommendation:
+
+- Keep this minimal automated fix.
+- Do not reintroduce unknown fill status as a placement outcome.
 
 ### Recovery Stack
 
-Files:
+Current behavior:
 
-- `engine/src/live_executor.rs`
-- `engine/src/naked_legs.rs`
-- `engine/src/pin_yank.rs`
-- `bet-placer/index.js`
-- `bet-placer/src/sportsbooks/draftkings.js`
-- `bet-placer/src/sportsbooks/fanduel.js`
+- If leg 1 fills and leg 2 cannot safely complete, Rust enters recovery.
+- Pinnacle rescue can quote the original market and adjacent total/spread/team-total lines.
+- Rescue stake balances payout against the filled soft leg.
+- Rescue stops after `RESCUE_PIN_HARD_YANK_THRESHOLD`, default `3`, hard-yank errors.
+- If a soft-book cashout offer exists and is cheaper than rescue loss, Rust prefers cashout.
+- If rescue/cashout do not resolve the exposure, Rust writes `data/naked-legs.json`.
+- The polling loop monitors persisted naked legs every `NAKED_LEG_MONITOR_CYCLES`, default `10`, and tries status, cashout, and original-line Pinnacle relist recovery.
 
-What our engine previously did:
+Left out:
 
-- If leg 1 filled and leg 2 failed or post-fill math killed the arb, execution
-  usually logged the exposure and returned `None`.
-
-What was merged:
-
-- Adjacent-line PIN rescue for moneyline, total, spread, and team-total PIN key
-  shapes. Moneyline retries original only; totals/spreads try Hunter-style
-  neighboring lines.
-- Rescue stake uses payout balancing.
-- Rescue-specific N-miss hard-yank threshold defaults to 3.
-- If DK status exposes a cashout offer and cashout is cheaper than the rescue
-  loss, Rust skips the hedge and attempts cashout instead.
-- If rescue and cashout do not resolve exposure, Rust writes a durable naked-leg
-  entry to `data/naked-legs.json`.
-- The polling loop periodically reloads naked legs, attempts original-line PIN
-  relist recovery, checks soft-book status, and retries cashout when available.
-
-How this changes our process:
-
-- A failed Pinnacle hedge is no longer a dead-end log line.
-- Restarting the engine does not erase unresolved exposure.
-
-What was left out:
-
-- Full Hunter cashout retry schedule at 30s/60s/120s/300s/600s.
-- DK MyBets websocket/history fallback.
-- Hunter's broader settlement-ingest pipeline.
+- Full Hunter cashout retry schedule.
+- DK MyBets fallback.
+- Settlement-ingest pipeline.
+- Any manual "unknown placed" stop.
 
 Recommendation:
 
-- Keep this first-wave recovery path. Treat DK live testing as mandatory before
-  raising stake size.
+- Keep first-wave recovery.
+- Add terminal visibility for cashout commands/results if operator logs need to show every recovery action.
 
 ### DK Cashout / Status Classifier
 
-Files:
+Current behavior:
 
-- `engine/src/status_classifier.rs`
-- `bet-placer/src/sportsbooks/draftkings.js`
+- `Unsettled`, `Not Settled`, `Open`, `Pending`, `Placed`, `Accepted`, `Processing`, and `LiveDelay` classify as open.
+- `Cashed Out` is a confirmed cashout status.
+- Won/lost/voided/refunded/canceled/push statuses classify as terminal non-cashout.
+- DK `getBetStatus` uses `getPurchases`.
+- DK `cashOut` requires a cashout offer and then confirms the result through raw status.
 
-What our engine previously did:
+Left out:
 
-- It lacked a Rust equivalent of Hunter's raw status rules.
-
-What was merged:
-
-- `Unsettled`, `Not Settled`, `Open`, `Pending`, `Placed`, `Accepted`,
-  `Processing`, and `LiveDelay` remain open.
-- `Cashed Out` is distinct from ordinary settlement.
-- `Settled`, won/lost, voided, refunded, canceled, and push are terminal
-  non-cashout outcomes.
-- DK `getBetStatus` and `cashOut` bridge methods return raw status fields for
-  Rust classification.
-
-How this changes our process:
-
-- We do not trust a normalized "settled" status if raw DK status says the bet is
-  still open.
-- Cashout is only treated as resolved when raw status supports it or the DK
-  bridge returns confirmed cashout.
-
-What was left out:
-
-- Settlement P&L ingestion and MyBets history fallback.
+- Settlement P&L ingest.
+- MyBets fallback.
 
 Recommendation:
 
-- Keep this. Add settlement ingest later as an accounting feature, not as part
-  of dedup/ladder.
+- Keep classifier.
+- Add settlement ingest later as accounting infrastructure.
 
 ### FD Cashout
 
-Files:
+Current behavior:
 
-- `bet-placer/src/sportsbooks/fanduel.js`
-- `bet-placer/index.js`
-- `engine/src/live_executor.rs`
+- `getOpenBets()` calls FanDuel `getEligibleBets?sortBy=START_TIME`.
+- `getOpenBets()` extracts open bet IDs, status, offer, `cashOutToken`, and delay.
+- `cashOut(betId)` fetches a fresh `cashOutToken` immediately before sending `cashoutBet`.
+- FanDuel cashout writes run from the browser page context because the write needs fresh browser geo/session state.
+- Geo headers read `localStorage.geolocation_document.jwt` first, with `location_token.jwt` only as fallback.
+- FanDuel placement returns top-level bet ID and purchase ID values into the Rust fill path.
 
-What our engine previously did:
+Left out:
 
-- The FanDuel adapter could place bets and refresh market prices, but it did
-  not expose open bets, cashout tokens, or a cashout method.
-- FD placement results only carried bet IDs inside nested bet data, which made
-  rescue/cashout paths less reliable.
-- The adapter read the older `location_token.jwt` geo source and did not have a
-  cashout write path with Hunter's `x-geo-packet` freshness rule.
-
-What was merged:
-
-- `getOpenBets()` calls FD's HAR-verified
-  `getEligibleBets?sortBy=START_TIME` endpoint and extracts open bet IDs,
-  status, cashout offer, `cashOutToken`, and bet delay.
-- `cashOut(betId)` fetches a fresh `cashOutToken` immediately before sending
-  FD's `cashoutBet` request.
-- FD `executeBet()` now exposes top-level `_betId` and `_purchaseId`, mirroring
-  Hunter's fix so Rust receives `bet_id` / `purchase_id` in the fill report.
-- The adapter now reads `localStorage.geolocation_document.jwt` first, with
-  `location_token.jwt` only as a legacy fallback.
-- FD cashout writes use a browser-page POST path instead of Node-side
-  `context.request`, and the path decodes the geo JWT expiry and refreshes it
-  only when missing or near expiry.
-- A Rust-bridge `getBetStatus()` wrapper was added around `getOpenBets()` so
-  existing rescue/cashout comparison can see FD cashout offers.
-- Successful FD cashout returns `confirmed: true` and raw status `Cashed Out`
-  so Rust marks the exposure resolved.
-
-How this changes our process:
-
-- If FanDuel is leg 1 and the Pinnacle hedge fails, Rust can now compare a live
-  FD cashout offer against rescue loss, then cash out FD when appropriate.
-- If no cashout offer was known before rescue, the final cashout attempt still
-  fetches a fresh FD token before writing.
-- This does not add a second FD browser or a GUI surface. It uses the existing
-  logged-in FD browser context.
-- Fresh geo-token refresh only happens when the JWT is missing or stale, so a
-  fresh session does not pay the extra navigation cost on every cashout.
-
-What was left out:
-
-- Hunter's `node-tls-client` / TLS impersonation transport.
-- Hunter's FD UI fallback placement machinery.
-- Hunter's NBA player-prop, alt-market, and partial-period FD code.
-- Hunter's large FD diagnostics/event-logger/lifecycle stack.
-- Hunter's DSC-0015 rolling hard-reset counter.
-- Hunter's settlement-ingest and standalone open-bets polling subsystem.
-- Hunter's manual FD cashout test scripts as runtime code.
-- A full replacement of our compact FD adapter with Hunter's much larger
-  FanDuel adapter.
+- Hunter's TLS impersonation transport.
+- FD UI fallback placement.
+- FD DSC-0015 rolling hard-reset counter.
+- FD player props, alt markets, partial-period surfaces, and large diagnostics stack.
+- Standalone open-bets polling subsystem.
 
 Recommendation:
 
-- Keep this scoped port. If FD cashout still hits DSC-0015 in live testing,
-  consider adding Hunter's hard-reset recovery before considering TLS
-  impersonation or the broader FD adapter.
+- Keep scoped FD cashout.
+- Add hard-reset handling only if logs show repeated geo-token or DSC-0015 failures.
 
 ### Structured Attempt Telemetry
 
-Files:
+Current behavior:
 
-- `engine/src/attempt_telemetry.rs`
-- `engine/src/live_executor.rs`
+- Global telemetry writes to `data/events.jsonl`, or `ATTEMPT_TELEMETRY_DIR/events.jsonl`.
+- Per-attempt telemetry writes to `data/bets/<attempt_id>.jsonl`.
+- Events cover quote, validation, pre-fire recheck, leg sent/filled, recovery, cashout, naked leg, and monitor stages.
 
-What our engine previously did:
+Left out:
 
-- It relied on terminal/tracing output and SQLite trade records.
-
-What was merged:
-
-- Rust writes global JSONL events to `data/events.jsonl`.
-- Rust writes each attempt lifecycle to `data/bets/<attempt_id>.jsonl`.
-- Events include quote, validation, pre-fire recheck, leg sent/filled, rescue,
-  cashout, naked-leg, and monitor stages.
-
-How this changes our process:
-
-- Terminal output remains primary for the operator.
-- After an incident, we can read one attempt file and see the full lifecycle.
-
-What was left out:
-
-- Hunter's exact event schema and `event-logger.js`.
+- Hunter's exact event schema.
+- Frontend telemetry views.
 
 Recommendation:
 
-- Keep the Rust-native schema and refine it from real test runs.
-
-### Test And Fixture Hygiene
-
-Files:
-
-- `engine/src/execution_math.rs`
-- `engine/src/status_classifier.rs`
-- `engine/src/live_executor.rs`
-- `engine/src/odds_verifier.rs`
-- `engine/src/rescue_hedger.rs`
-- `engine/src/team_names.rs`
-
-What our engine previously did:
-
-- Some tests were stale after model changes.
-
-What was merged:
-
-- Tests now cover authenticated hedge math, DK raw status classification, and
-  PIN adjacent-line rescue ID expansion.
-- Stale test constructors were updated to current model fields.
-
-What was left out:
-
-- Full Hunter incident replay fixture harness.
-
-Recommendation:
-
-- Add replay fixtures after the first live test cycle exposes which cases are
-  most valuable to freeze.
+- Keep Rust-native JSONL.
+- Use per-attempt files as the first incident-review source.
 
 ## Shelved For Next Merge Phase
 
 ### Advanced Family / Ladder Dedup
 
-This is the only feature currently shelved for the second merge phase.
+This is the only planned phase-two merge item.
 
-What Hunter has:
-
-- Family-scope dedup so the same event/market family cannot refire repeatedly
-  just because lines churn.
-- Ladder controls that allow repeated adjacent-line firing only for explicit
-  allowlisted families.
-- Period-aware family keys so full game, halves, quarters, or periods do not
-  accidentally block or allow each other.
-- Telemetry around ladder allowed/blocked decisions.
-
-What our engine has:
-
-- Basic time-based trade dedup in the polling loop.
-
-Why this is next:
-
-- It directly controls repeated exposure.
-- It can be ported without changing GUI, props, or market scope.
-- It should reuse the same family identity work needed for future PIN
-  family-level yank blacklists.
-
-Recommended second-phase scope:
+Required scope:
 
 - Add a Rust family key for live fire dedup.
-- Preserve period in the dedup key.
+- Preserve period in the family key.
 - Default to family-scope blocking.
 - Add explicit ladder allowlist behavior only where configured.
-- Keep terminal logs clear when a candidate is blocked or allowed by dedup.
+- Log terminal-visible blocked/allowed decisions.
+- Reuse the family identity for future family-level Pinnacle yank behavior.
 
-## Not Merged And Not In The Next Merge Phase
+Why it is next:
 
-| Feature / difference | Current status | Recommendation |
-|---|---|---|
-| GUI / frontend / dashboard port | Not merged and not planned. | Leave out entirely. |
-| Player props | Not merged and not planned. | Leave out until ML/totals/spreads are stable. |
-| Full Hunter monolith | Not merged and not desired. | Preserve typed Rust modules. |
-| Hunter state-map coupling | Not merged and not desired. | Model state explicitly in Rust when needed. |
-| DK NewOffer filled-leg handoff | Not merged. | Consider after first-wave testing if DK drift accepts create unknown/partial outcomes. |
-| DK validation retry taxonomy | Not merged. | Add only if logs show transient validation failures worth retrying. |
-| DK MyBets websocket/history fallback | Not merged. | Add with settlement/cashout hardening, not dedup. |
-| Full cashout retry schedule | Not merged. | Add after observing whether immediate cashout misses are common. |
-| FD TLS impersonation transport | Not merged. | Leave out unless page-context cashout still fails with evidence. |
-| FD UI fallback placement | Not merged. | Leave out unless FD API placement becomes unreliable and we intentionally expand adapter scope. |
-| FD DSC-0015 hard-reset counter | Not merged. | Add only if logs show repeated stale/invalid geo-token failures after the scoped refresh. |
-| Settlement ingest parity | Not merged. | Add later for P&L/accounting correctness. |
-| Family-level PIN hard-yank blacklist | Not merged. | Pair with dedup/family key work or a later safety phase. |
-| Matchup umbrella PIN cooldown | Not merged. | Pair with family/yank design after testing market-id blacklist behavior. |
-| Full Hunter event schema | Not merged. | Keep Rust-native telemetry unless an external tool requires Hunter parity. |
-| Historical incident replay harness | Not merged. | Strongly recommended before expanding recovery/cashout complexity. |
-| Hunter env profile compatibility | Not merged. | Translate only gates tied to features we actually port. |
-| Broad period expansion | Not merged. | Leave gated until period identity and settlement proof are stronger. |
-| FD basketball alt totals/spreads | Not merged. | Leave out until operator canary/replay exists. |
-| FD NBA 1H / partial-period surfaces | Not merged. | Leave out until period identity is proven. |
-| Team totals beyond rescue key support | Not merged as detection scope. | Keep current ML/totals/spreads fire scope. |
-| Production stake profile migration | Not merged. | Do not raise stakes until first-wave live tests are reviewed. |
-| Fourth-book / generic multi-book expansion | Not merged. | Leave out; this merge is safety into Rust, not sportsbook expansion. |
-| Hunter canary/revenue unlocks | Not merged. | Leave out until the core live-money safety path is stable. |
+- It directly controls repeated exposure from the same event/market family.
+- It does not require props, UI, new books, or a broader market scope.
+- It is the cleanest next safety upgrade after first-wave live testing.
+
+## Required Fixes Before Higher-Stake Live Use
+
+These are not the phase-two Hunter dedup item, but they are current project work that should be addressed before raising stake size.
+
+| Work item | Reason |
+| --- | --- |
+| Stop mapping unknown Pinnacle periods to `full_game` | Current parser falls back unknown period numbers to full game. That can make live period markets look like full-game markets. |
+| Improve recovery terminal visibility | Cashout attempts/results are currently visible in JSONL telemetry, but not always obvious in terminal output. |
+| Decide whether to remove unused unknown-fill fields | The unknown/manual reconciliation behavior is not being merged. Any unused remnants should be removed if they are not needed for real adapter payloads. |
+| Add incident replay fixtures | Live issues should become deterministic tests before recovery logic grows. |
+
+## Not Merged And Not Planned
+
+| Feature | Decision |
+| --- | --- |
+| GUI/frontend port | Leave out. |
+| Player props | Leave out until ML/totals/spreads are stable. |
+| Full Hunter monolith | Leave out. |
+| Hunter indeterminate Pinnacle write response | Leave out. Do not send `fill_report status="unknown"` / `retry_allowed=false` as a live placement outcome. The engine must receive automated filled/rejected/error truth. |
+| Manual unknown-fill reconciliation status | Leave out. The engine must not require operator reconciliation as part of normal automation. |
+| Second Pinnacle browser | Leave out. |
+| Guest/auth Pinnacle double-scan | Leave out unless explicitly reintroduced for diagnostics. |
+| FD TLS impersonation | Leave out unless browser-context writes fail with evidence. |
+| FD UI fallback placement | Leave out unless API placement becomes unreliable with evidence. |
+| FD DSC-0015 hard-reset counter | Leave out unless geo/PX failure logs justify it. |
+| DK MyBets fallback | Not planned for phase two. Revisit with settlement work. |
+| Full cashout retry schedule | Not planned for phase two. Revisit after live evidence. |
+| Settlement ingest parity | Not planned for phase two. Add later for accounting correctness. |
+| Full Hunter event schema | Leave out unless an external tool needs it. |
+| Broad period expansion | Leave out until period identity is proven. |
+| FD basketball alts and partial periods | Leave out. |
+| Team totals as detection scope | Leave out; team-total IDs are only used where useful for rescue key handling. |
+| Fourth-book or generic multi-book expansion | Leave out. |
+| Production stake profile migration | Leave out until low-stake live tests are stable. |
