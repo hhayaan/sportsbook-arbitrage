@@ -4,6 +4,7 @@ mod attempt_telemetry;
 mod circuit_breaker;
 mod config;
 mod db;
+mod detector_telemetry;
 mod execution_math;
 mod family_dedup;
 mod live_executor;
@@ -30,9 +31,87 @@ use axum::{
     Router,
 };
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
+
+fn venue_alias(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "dk" | "draftkings" | "draft_kings" => Some("draftkings"),
+        "fd" | "fanduel" | "fan_duel" => Some("fanduel"),
+        "pin" | "pinnacle" => Some("pinnacle"),
+        _ => None,
+    }
+}
+
+fn canonical_venue_pair(a: &str, b: &str) -> String {
+    if a <= b {
+        format!("{}/{}", a, b)
+    } else {
+        format!("{}/{}", b, a)
+    }
+}
+
+fn candidate_venue_pair_key(candidate: &models::ArbCandidate) -> String {
+    canonical_venue_pair(&candidate.leg1_venue, &candidate.leg2_venue)
+}
+
+fn live_allowed_pairs_from_env() -> Option<BTreeSet<String>> {
+    let raw = std::env::var("LIVE_ALLOWED_PAIRS").ok()?;
+    let raw = raw.trim();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("all") || raw == "*" {
+        return None;
+    }
+
+    let mut pairs = BTreeSet::new();
+    for token in raw.split([',', ';']) {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+
+        let parts: Vec<&str> = token
+            .split(['/', '+', '|', '-'])
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect();
+
+        if parts.len() != 2 {
+            tracing::warn!(
+                "Ignoring invalid LIVE_ALLOWED_PAIRS token '{}'; expected venue/venue",
+                token
+            );
+            continue;
+        }
+
+        match (venue_alias(parts[0]), venue_alias(parts[1])) {
+            (Some(a), Some(b)) if a != b => {
+                pairs.insert(canonical_venue_pair(a, b));
+            }
+            _ => tracing::warn!(
+                "Ignoring invalid LIVE_ALLOWED_PAIRS token '{}'; expected venues like fanduel/pinnacle",
+                token
+            ),
+        }
+    }
+
+    Some(pairs)
+}
+
+fn live_allowed_pairs_label(pairs: &Option<BTreeSet<String>>) -> String {
+    match pairs {
+        None => "all".to_string(),
+        Some(pairs) if pairs.is_empty() => "none".to_string(),
+        Some(pairs) => pairs.iter().cloned().collect::<Vec<_>>().join(","),
+    }
+}
+
+fn live_pair_allowed(pairs: &Option<BTreeSet<String>>, pair: &str) -> bool {
+    pairs
+        .as_ref()
+        .map_or(true, |allowed| allowed.contains(pair))
+}
 
 #[tokio::main]
 async fn main() {
@@ -107,13 +186,17 @@ async fn main() {
     let pin_odds_source = odds_fetcher::pinnacle_odds_source_name();
     let pin_auth_odds_base_url = odds_fetcher::pinnacle_auth_odds_base_url();
     let dk_proxy_base_url = odds_fetcher::draftkings_proxy_base_url();
+    let live_allowed_pairs = live_allowed_pairs_from_env();
+    let live_allowed_pairs_label = live_allowed_pairs_label(&live_allowed_pairs);
 
     tracing::info!(
-        "Settings: enabled={} stake_mode={} fixed_stake=${:.2} max_stake=${:.2} min_arb_pct={:.1}% max_hours={} skip_live={} pin_odds_source={} family_dedup_ttl={}s",
+        "Settings: enabled={} stake_mode={} fixed_stake=${:.2} max_stake=${:.2} min_arb_pct={:.1}% max_hours={} skip_live={} pin_odds_source={} live_allowed_pairs={} family_dedup_ttl={}s FAMILY_DEDUP_SUCCESS_COOLDOWN_SECS={} FAMILY_DEDUP_SUCCESS_MAX_REPEATS={}",
         settings_overrides.enabled, settings_overrides.stake_mode,
         settings_overrides.fixed_stake, settings_overrides.max_stake, settings_overrides.min_arb_pct,
-        max_hours_to_start, skip_live, pin_odds_source,
-        family_dedup::FamilyDedup::ttl_secs_from_env()
+        max_hours_to_start, skip_live, pin_odds_source, live_allowed_pairs_label,
+        family_dedup::FamilyDedup::ttl_secs_from_env(),
+        family_dedup::FamilyDedup::success_cooldown_secs_from_env(),
+        family_dedup::FamilyDedup::success_max_repeats_from_env()
     );
     tracing::info!("DraftKings proxy endpoint: {}", dk_proxy_base_url);
     if pin_odds_source == "auth" {
@@ -182,8 +265,10 @@ async fn main() {
         let mut book = models::Book::new(config::MAX_DATA_AGE_MS);
         let mut family_dedup = family_dedup::FamilyDedup::load_from_env();
         tracing::info!(
-            "Family dedup configured: ttl={}s file={}",
+            "Family dedup configured: ttl={}s success_cooldown={}s success_max_repeats={} file={}",
             family_dedup.ttl_secs(),
+            family_dedup.success_cooldown_secs(),
+            family_dedup.success_max_repeats(),
             std::env::var("FAMILY_DEDUP_FILE")
                 .unwrap_or_else(|_| "data/family-dedup.json".to_string())
         );
@@ -281,21 +366,45 @@ async fn main() {
                 book.identity_keys().len(),
             );
 
+            let detector_telemetry_enabled = detector_telemetry::enabled();
+            if detector_telemetry_enabled {
+                detector_telemetry::emit_market_counts(&markets);
+            }
+
             // Detect arbs
             // DK-FD arbs lost money — require Pinnacle on one side for production
             let require_pinnacle_leg = true;
-            let candidates = arb_detector::detect_arbs(
-                &book,
-                now_ms,
-                config::MAX_DATA_AGE_MS,
-                require_pinnacle_leg,
-            );
+            let candidates = if detector_telemetry_enabled {
+                let detection = arb_detector::analyze(
+                    &book,
+                    now_ms,
+                    config::MAX_DATA_AGE_MS,
+                    require_pinnacle_leg,
+                    detector_telemetry::snapshot_limit(),
+                    detector_telemetry::near_miss_sigma_max(),
+                );
+                detector_telemetry::emit_detection_diagnostics(&detection.diagnostics);
+                detection.candidates
+            } else {
+                arb_detector::detect_arbs(
+                    &book,
+                    now_ms,
+                    config::MAX_DATA_AGE_MS,
+                    require_pinnacle_leg,
+                )
+            };
 
             if !candidates.is_empty() {
                 tracing::info!("Detected {} arb candidates", candidates.len());
             }
 
             let settings = poll_db.get_settings();
+            if detector_telemetry_enabled {
+                detector_telemetry::emit_candidate_events(
+                    &candidates,
+                    settings.min_arb_pct / 100.0,
+                );
+            }
 
             for candidate in &candidates {
                 let arb_id = uuid::Uuid::new_v4().to_string();
@@ -416,25 +525,76 @@ async fn main() {
                         {
                             continue;
                         }
+
+                        let live_pair = candidate_venue_pair_key(candidate);
+                        if !live_pair_allowed(&live_allowed_pairs, &live_pair) {
+                            tracing::info!(
+                                "[LIVE PAIR SKIP] {} not in LIVE_ALLOWED_PAIRS={} | {} {} {}",
+                                live_pair,
+                                live_allowed_pairs_label,
+                                candidate.sport,
+                                candidate.market_type,
+                                candidate.event_id
+                            );
+                            if detector_telemetry_enabled {
+                                let soft_venue = if candidate.leg1_venue == "pinnacle" {
+                                    candidate.leg2_venue.as_str()
+                                } else {
+                                    candidate.leg1_venue.as_str()
+                                };
+                                let _ = attempt_telemetry::emit_event(
+                                    "LIVE_PAIR_SKIPPED",
+                                    None,
+                                    json!({
+                                        "event_id": candidate.event_id.clone(),
+                                        "sport": candidate.sport.clone(),
+                                        "venue_pair": live_pair,
+                                        "allowed_pairs": live_allowed_pairs_label.clone(),
+                                        "soft_venue": soft_venue,
+                                        "leg1_venue": candidate.leg1_venue.clone(),
+                                        "leg2_venue": candidate.leg2_venue.clone(),
+                                        "market_type": candidate.market_type.clone(),
+                                        "period": candidate.period.clone(),
+                                    }),
+                                );
+                            }
+                            continue;
+                        }
                     }
 
                     let candidate_to_trade = candidate.clone();
                     let live_execution_available = ws_conn.is_some();
 
                     if live_execution_available {
+                        let soft_venue = if candidate_to_trade.leg1_venue == "pinnacle" {
+                            candidate_to_trade.leg2_venue.as_str()
+                        } else {
+                            candidate_to_trade.leg1_venue.as_str()
+                        };
+                        let venue_pair =
+                            if candidate_to_trade.leg1_venue <= candidate_to_trade.leg2_venue {
+                                format!(
+                                    "{}/{}",
+                                    candidate_to_trade.leg1_venue, candidate_to_trade.leg2_venue
+                                )
+                            } else {
+                                format!(
+                                    "{}/{}",
+                                    candidate_to_trade.leg2_venue, candidate_to_trade.leg1_venue
+                                )
+                            };
                         if let Some(hit) = family_dedup.lock_status(&candidate_to_trade) {
                             tracing::info!(
-                                "[FAMILY DEDUP] Skip {} {} {} via {} ({}s left, reason={}, key={})",
+                                "[FAMILY DEDUP] Skip {} {} {} via {} ({}s left, policy={}, reason={}, fills={}/{}, key={})",
                                 candidate_to_trade.sport,
                                 candidate_to_trade.market_type,
                                 candidate_to_trade.period,
-                                if candidate_to_trade.leg1_venue == "pinnacle" {
-                                    &candidate_to_trade.leg2_venue
-                                } else {
-                                    &candidate_to_trade.leg1_venue
-                                },
+                                soft_venue,
                                 hit.remaining_secs,
+                                hit.policy,
                                 hit.reason,
+                                hit.successful_fills,
+                                hit.max_successful_fills,
                                 hit.key
                             );
                             let _ = attempt_telemetry::emit_event(
@@ -443,14 +603,38 @@ async fn main() {
                                 json!({
                                     "key": hit.key,
                                     "reason": hit.reason,
+                                    "policy": hit.policy,
                                     "remaining_secs": hit.remaining_secs,
+                                    "successful_fills": hit.successful_fills,
+                                    "max_successful_fills": hit.max_successful_fills,
                                     "event_id": candidate_to_trade.event_id,
                                     "sport": candidate_to_trade.sport,
+                                    "venue_pair": venue_pair,
+                                    "soft_venue": soft_venue,
+                                    "leg1_venue": candidate_to_trade.leg1_venue,
+                                    "leg2_venue": candidate_to_trade.leg2_venue,
                                     "market_type": candidate_to_trade.market_type,
                                     "period": candidate_to_trade.period,
                                 }),
                             );
                             continue;
+                        }
+
+                        if detector_telemetry_enabled {
+                            let _ = attempt_telemetry::emit_event(
+                                "FAMILY_DEDUP_PASSED",
+                                None,
+                                json!({
+                                    "event_id": candidate_to_trade.event_id.clone(),
+                                    "sport": candidate_to_trade.sport.clone(),
+                                    "venue_pair": venue_pair.clone(),
+                                    "soft_venue": soft_venue,
+                                    "leg1_venue": candidate_to_trade.leg1_venue.clone(),
+                                    "leg2_venue": candidate_to_trade.leg2_venue.clone(),
+                                    "market_type": candidate_to_trade.market_type.clone(),
+                                    "period": candidate_to_trade.period.clone(),
+                                }),
+                            );
                         }
                     }
 
@@ -471,9 +655,10 @@ async fn main() {
                     if let Some(result) = execution_result {
                         if let Some(reason) = result.family_lock_reason.as_deref() {
                             if live_execution_available {
-                                let entry = family_dedup.record_lock(&candidate_to_trade, reason);
+                                let entry =
+                                    family_dedup.record_hard_lock(&candidate_to_trade, reason);
                                 tracing::info!(
-                                    "[FAMILY DEDUP] Locked {} for {}s after {} (key={})",
+                                    "[FAMILY DEDUP] Hard-locked {} for {}s after {} (key={})",
                                     entry.event_id,
                                     family_dedup.ttl_secs(),
                                     entry.reason,
@@ -491,6 +676,7 @@ async fn main() {
                                         "market_type": entry.market_type,
                                         "period": entry.period,
                                         "expires_at_ms": entry.expires_at_ms,
+                                        "policy": "hard_lock",
                                     }),
                                 );
                             }
@@ -512,15 +698,18 @@ async fn main() {
                             poll_db.mark_arb_traded(&arb_id);
                             if live_execution_available {
                                 let entry =
-                                    family_dedup.record_lock(&candidate_to_trade, "both_filled");
+                                    family_dedup.record_successful_fill(&candidate_to_trade);
                                 tracing::info!(
-                                    "[FAMILY DEDUP] Locked {} for {}s after fill (key={})",
+                                    "[FAMILY DEDUP] Recorded successful fill for {} (fills={}/{}, cooldown={}s, ttl={}s, key={})",
                                     entry.event_id,
+                                    entry.successful_fills,
+                                    family_dedup.max_successful_fills(),
+                                    family_dedup.success_cooldown_secs(),
                                     family_dedup.ttl_secs(),
                                     entry.key
                                 );
                                 let _ = attempt_telemetry::emit_event(
-                                    "FAMILY_DEDUP_LOCKED",
+                                    "FAMILY_DEDUP_SUCCESS_RECORDED",
                                     None,
                                     json!({
                                         "key": entry.key,
@@ -531,6 +720,11 @@ async fn main() {
                                         "market_type": entry.market_type,
                                         "period": entry.period,
                                         "expires_at_ms": entry.expires_at_ms,
+                                        "cooldown_until_ms": entry.cooldown_until_ms,
+                                        "successful_fills": entry.successful_fills,
+                                        "max_successful_fills": family_dedup.max_successful_fills(),
+                                        "success_cooldown_secs": family_dedup.success_cooldown_secs(),
+                                        "policy": "success_repeat_limited",
                                     }),
                                 );
                             }

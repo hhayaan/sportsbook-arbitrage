@@ -3,6 +3,7 @@ use crate::models::CanonicalMarket;
 use crate::team_names;
 use reqwest::Client;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_ODDS_FETCH_TIMEOUT_MS: u64 = 2_500;
@@ -56,6 +57,22 @@ fn american_to_decimal(american: f64) -> f64 {
         1.0 + american / 100.0
     } else {
         1.0 + 100.0 / american.abs()
+    }
+}
+
+fn pinnacle_period_label(period: u64) -> Option<&'static str> {
+    match period {
+        0 => Some("full_game"),
+        1 => Some("first_half"),
+        2 => Some("second_half"),
+        3 => Some("first_3_innings"),
+        4 => Some("inning_4"),
+        5 => Some("inning_5"),
+        6 => Some("regulation"),
+        7 => Some("inning_7"),
+        8 => Some("inning_8"),
+        9 => Some("inning_9"),
+        _ => None,
     }
 }
 
@@ -650,6 +667,7 @@ fn parse_fd_response(json: &Value, sport: &str) -> Result<Vec<CanonicalMarket>, 
             events_map.insert(k.clone(), v);
         }
     }
+    let competition_names = fd_competition_names(attachments);
 
     // Parse markets
     if let Some(fd_markets) = attachments.get("markets").and_then(|v| v.as_object()) {
@@ -679,6 +697,11 @@ fn parse_fd_response(json: &Value, sport: &str) -> Result<Vec<CanonicalMarket>, 
             let is_live = event
                 .and_then(|e| e.get("inPlay").and_then(|v| v.as_bool()))
                 .unwrap_or(false);
+            let resolved_sport =
+                match resolve_fd_event_sport(sport, event.copied(), &competition_names) {
+                    Some(s) => s,
+                    None => continue,
+                };
 
             let market_name = market
                 .get("marketName")
@@ -699,7 +722,8 @@ fn parse_fd_response(json: &Value, sport: &str) -> Result<Vec<CanonicalMarket>, 
             if fd_home == "unknown" || fd_away == "unknown" {
                 continue;
             }
-            let fd_event_id = team_names::canonical_event_id(sport, &fd_away, &fd_home, start_time);
+            let fd_event_id =
+                team_names::canonical_event_id(&resolved_sport, &fd_away, &fd_home, start_time);
 
             if let Some(runners) = market.get("runners").and_then(|v| v.as_array()) {
                 for runner in runners {
@@ -758,7 +782,8 @@ fn parse_fd_response(json: &Value, sport: &str) -> Result<Vec<CanonicalMarket>, 
                     out_push_fd(
                         &mut markets,
                         &fd_event_id,
-                        sport,
+                        &resolved_sport,
+                        &event_id_str,
                         start_time,
                         &market_type,
                         &sel_normalized,
@@ -779,10 +804,78 @@ fn parse_fd_response(json: &Value, sport: &str) -> Result<Vec<CanonicalMarket>, 
     Ok(markets)
 }
 
+fn fd_competition_names(attachments: &Value) -> HashMap<String, String> {
+    let mut names = HashMap::new();
+    if let Some(competitions) = attachments.get("competitions").and_then(|v| v.as_object()) {
+        for (id, competition) in competitions {
+            if let Some(name) = competition.get("name").and_then(|v| v.as_str()) {
+                names.insert(id.clone(), name.to_string());
+                if let Some(comp_id) = competition.get("competitionId") {
+                    if let Some(comp_id) = value_to_string(comp_id) {
+                        names.insert(comp_id, name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
+fn resolve_fd_event_sport(
+    configured_sport: &str,
+    event: Option<&Value>,
+    competition_names: &HashMap<String, String>,
+) -> Option<String> {
+    if configured_sport != "SOCCER" {
+        return Some(configured_sport.to_string());
+    }
+
+    let event = event?;
+    let competition_name = event
+        .get("competitionId")
+        .and_then(value_to_string)
+        .and_then(|id| competition_names.get(&id).cloned())
+        .or_else(|| {
+            event
+                .get("competitionName")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })?;
+
+    map_fd_soccer_competition(&competition_name).map(str::to_string)
+}
+
+fn value_to_string(value: &Value) -> Option<String> {
+    if let Some(s) = value.as_str() {
+        Some(s.to_string())
+    } else if let Some(n) = value.as_u64() {
+        Some(n.to_string())
+    } else if let Some(n) = value.as_i64() {
+        Some(n.to_string())
+    } else {
+        None
+    }
+}
+
+fn map_fd_soccer_competition(name: &str) -> Option<&'static str> {
+    let normalized = name.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "english premier league" | "england premier league" | "premier league" => Some("EPL"),
+        "spanish la liga" | "spain la liga" | "la liga" => Some("LA_LIGA"),
+        "italian serie a" | "serie a" => Some("SERIE_A"),
+        "german bundesliga" | "bundesliga" => Some("BUNDESLIGA"),
+        "french ligue 1" | "ligue 1" => Some("LIGUE_1"),
+        "uefa champions league" | "champions league" => Some("UCL"),
+        "us mls" | "usa mls" | "major league soccer" | "mls" => Some("MLS"),
+        _ => None,
+    }
+}
+
 fn out_push_fd(
     out: &mut Vec<CanonicalMarket>,
     event_id: &str,
     sport: &str,
+    fd_event_id: &str,
     start_time: &str,
     market_type: &str,
     selection: &str,
@@ -811,7 +904,7 @@ fn out_push_fd(
         american_odds: american,
         venue: "fanduel".to_string(),
         venue_market_id: adapter_sel_id.to_string(),
-        venue_event_id: adapter_sel_id.to_string(),
+        venue_event_id: format!("fd:{}", fd_event_id),
         received_at_ms: ts,
     });
 }
@@ -1069,18 +1162,21 @@ fn parse_pinnacle_markets(
             };
 
             let period = mkt.get("period").and_then(|v| v.as_u64()).unwrap_or(0);
-            let period_str = match period {
-                0 => "full_game",
-                1 => "first_half",
-                2 => "second_half",
-                3 => "first_3_innings",
-                4 => "inning_4",
-                5 => "inning_5",
-                6 => "regulation", // NHL/soccer 3-way with draw
-                7 => "inning_7",
-                8 => "inning_8",
-                9 => "inning_9",
-                _ => "full_game",
+            if market_type == "moneyline" && period != 0 {
+                continue;
+            }
+
+            let period_str = match pinnacle_period_label(period) {
+                Some(label) => label,
+                None => {
+                    tracing::debug!(
+                        "[PIN] Skipping unsupported period {} for {} market key={}",
+                        period,
+                        market_type,
+                        mkt.get("key").and_then(|v| v.as_str()).unwrap_or("")
+                    );
+                    continue;
+                }
             };
 
             let pin_event_id =
@@ -1160,6 +1256,196 @@ fn parse_pinnacle_markets(
     }
 
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{map_fd_soccer_competition, parse_fd_response, parse_pinnacle_markets};
+    use serde_json::json;
+
+    #[test]
+    fn maps_supported_fd_soccer_competitions_to_league_sports() {
+        assert_eq!(map_fd_soccer_competition("US MLS"), Some("MLS"));
+        assert_eq!(
+            map_fd_soccer_competition("English Premier League"),
+            Some("EPL")
+        );
+        assert_eq!(
+            map_fd_soccer_competition("UEFA Champions League"),
+            Some("UCL")
+        );
+        assert_eq!(map_fd_soccer_competition("Premier League"), Some("EPL"));
+        assert_eq!(map_fd_soccer_competition("German Bundesliga 2"), None);
+    }
+
+    #[test]
+    fn fd_soccer_parser_uses_competition_league_for_event_id() {
+        let payload = json!({
+            "attachments": {
+                "competitions": {
+                    "141": { "competitionId": 141, "name": "US MLS" }
+                },
+                "events": {
+                    "100": {
+                        "eventId": 100,
+                        "name": "Toronto FC v New York City FC",
+                        "openDate": "2026-05-10T23:00:00.000Z",
+                        "competitionId": 141,
+                        "inPlay": false
+                    }
+                },
+                "markets": {
+                    "200": {
+                        "eventId": 100,
+                        "marketId": 200,
+                        "marketName": "Moneyline",
+                        "marketType": "MONEY_LINE",
+                        "runners": [
+                            {
+                                "runnerName": "Toronto FC",
+                                "selectionId": 1,
+                                "winRunnerOdds": {
+                                    "trueOdds": { "decimalOdds": { "decimalOdds": 2.1 } },
+                                    "americanDisplayOdds": { "americanOdds": 110 }
+                                }
+                            },
+                            {
+                                "runnerName": "New York City FC",
+                                "selectionId": 2,
+                                "winRunnerOdds": {
+                                    "trueOdds": { "decimalOdds": { "decimalOdds": 3.4 } },
+                                    "americanDisplayOdds": { "americanOdds": 240 }
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+
+        let markets = parse_fd_response(&payload, "SOCCER").expect("parse fd soccer");
+        assert_eq!(markets.len(), 2);
+        assert!(markets.iter().all(|m| m.sport == "MLS"));
+        assert!(markets.iter().all(|m| m.event_id.starts_with("MLS:")));
+        assert!(markets.iter().all(|m| m.venue_event_id == "fd:100"));
+    }
+
+    #[test]
+    fn fd_soccer_parser_skips_unsupported_competitions() {
+        let payload = json!({
+            "attachments": {
+                "competitions": {
+                    "61": { "competitionId": 61, "name": "German Bundesliga 2" }
+                },
+                "events": {
+                    "100": {
+                        "eventId": 100,
+                        "name": "Team A v Team B",
+                        "openDate": "2026-05-10T23:00:00.000Z",
+                        "competitionId": 61,
+                        "inPlay": false
+                    }
+                },
+                "markets": {
+                    "200": {
+                        "eventId": 100,
+                        "marketId": 200,
+                        "marketName": "Moneyline",
+                        "marketType": "MONEY_LINE",
+                        "runners": [
+                            {
+                                "runnerName": "Team A",
+                                "selectionId": 1,
+                                "winRunnerOdds": {
+                                    "trueOdds": { "decimalOdds": { "decimalOdds": 2.1 } }
+                                }
+                            },
+                            {
+                                "runnerName": "Team B",
+                                "selectionId": 2,
+                                "winRunnerOdds": {
+                                    "trueOdds": { "decimalOdds": { "decimalOdds": 3.4 } }
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+
+        let markets = parse_fd_response(&payload, "SOCCER").expect("parse fd soccer");
+        assert!(markets.is_empty());
+    }
+
+    #[test]
+    fn pinnacle_parser_skips_non_full_game_moneylines() {
+        let matchups = json!([{
+            "type": "matchup",
+            "id": 1630404899,
+            "startTime": "2026-05-09T20:00:00Z",
+            "isLive": true,
+            "participants": [
+                { "id": 10, "alignment": "home", "name": "Cincinnati Reds" },
+                { "id": 20, "alignment": "away", "name": "Houston Astros" }
+            ]
+        }]);
+        let markets = json!([
+            {
+                "matchupId": 1630404899,
+                "type": "moneyline",
+                "period": 10,
+                "key": "s;10;m",
+                "prices": [
+                    { "designation": "home", "participantId": 10, "price": 250 },
+                    { "designation": "away", "participantId": 20, "price": 290 }
+                ]
+            },
+            {
+                "matchupId": 1630404899,
+                "type": "moneyline",
+                "period": 0,
+                "key": "s;0;m",
+                "prices": [
+                    { "designation": "home", "participantId": 10, "price": -120 },
+                    { "designation": "away", "participantId": 20, "price": 110 }
+                ]
+            }
+        ]);
+
+        let parsed =
+            parse_pinnacle_markets("MLB", &matchups, &markets, 1).expect("parse pinnacle markets");
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed.iter().all(|m| m.period == "full_game"));
+        assert!(parsed.iter().all(|m| m.venue_market_id.contains(":s;0;m:")));
+    }
+
+    #[test]
+    fn pinnacle_parser_skips_unknown_periods_instead_of_full_game_fallback() {
+        let matchups = json!([{
+            "type": "matchup",
+            "id": 1630404375,
+            "startTime": "2026-05-09T20:00:00Z",
+            "isLive": true,
+            "participants": [
+                { "id": 10, "alignment": "home", "name": "Baltimore Orioles" },
+                { "id": 20, "alignment": "away", "name": "Athletics" }
+            ]
+        }]);
+        let markets = json!([{
+            "matchupId": 1630404375,
+            "type": "total",
+            "period": 10,
+            "key": "s;10;ou;0.5",
+            "prices": [
+                { "designation": "over", "points": 0.5, "price": 105 },
+                { "designation": "under", "points": 0.5, "price": -115 }
+            ]
+        }]);
+
+        let parsed =
+            parse_pinnacle_markets("MLB", &matchups, &markets, 1).expect("parse pinnacle markets");
+        assert!(parsed.is_empty());
+    }
 }
 
 struct MatchupInfo {

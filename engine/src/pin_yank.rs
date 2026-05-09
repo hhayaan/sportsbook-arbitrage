@@ -95,4 +95,3 @@ mod tests {
         assert!(!is_pin_hard_yank_error("temporary timeout"));
     }
 }
-

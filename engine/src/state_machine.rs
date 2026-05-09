@@ -11,8 +11,14 @@ pub enum ArbState {
     CapitalReserved,
     Leg1Submitted,
     Leg1Awaiting,
-    Leg1Filled { accepted_stake: f64, accepted_odds: f64 },
-    Leg1Partial { accepted_stake: f64, accepted_odds: f64 },
+    Leg1Filled {
+        accepted_stake: f64,
+        accepted_odds: f64,
+    },
+    Leg1Partial {
+        accepted_stake: f64,
+        accepted_odds: f64,
+    },
     Leg1Rejected,
     Leg1Unknown,
     Leg2Submitted,
@@ -148,7 +154,11 @@ impl ArbAttempt {
                 from: "IDLE".into(),
                 to: "CANDIDATE_DETECTED".into(),
                 timestamp: now,
-                note: format!("sigma={:.4}, arb={:.2}%", candidate.sigma, candidate.arb_pct * 100.0),
+                note: format!(
+                    "sigma={:.4}, arb={:.2}%",
+                    candidate.sigma,
+                    candidate.arb_pct * 100.0
+                ),
             }],
         }
     }

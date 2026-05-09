@@ -79,25 +79,73 @@ $env:PIN_ODDS_SOURCE = "guest"
 
 Use guest mode only for diagnostics.
 
+## FanDuel Markets Fetch But No FD/PIN Arbs
+
+Current behavior:
+
+- FD non-soccer markets use their sport page.
+- FD soccer is fetched once as event type `1`, then supported competitions are mapped to league namespaces such as `MLS`, `EPL`, and `UCL`.
+- FD scan prices are public. Authenticated FD price is checked later through `validate_soft`.
+
+First diagnostic run:
+
+```powershell
+cd C:\dev\sportsbook-arbitrage\engine
+$env:DETECTOR_TELEMETRY = "1"
+cargo run --bin arb-engine
+```
+
+Inspect:
+
+```text
+C:\dev\sportsbook-arbitrage\engine\data\events.jsonl
+```
+
+Relevant event names:
+
+- `DETECTOR_MARKET_COUNTS`;
+- `DETECTOR_FUNNEL_SUMMARY`;
+- `DETECTOR_PIN_PAIR_SNAPSHOT`;
+- `DETECTOR_CANDIDATE`;
+- `DETECTOR_CANDIDATE_SUMMARY`;
+- `MIN_EDGE_SKIPPED`;
+- `FAMILY_DEDUP_PASSED`;
+- `FAMILY_DEDUP_SKIP`;
+- `FAMILY_DEDUP_LOCKED`;
+- `FAMILY_DEDUP_SUCCESS_RECORDED`.
+
+Interpretation:
+
+- No FD market count means the source fetch/parser is the issue.
+- FD markets but no FD/PIN shared identity keys means event identity or league mapping is the issue.
+- Shared identity keys but no complementary pairs means selection, line, or period normalization is the issue.
+- Candidate rows but no fire usually means min edge, family dedup, quote, validation, or pre-fire checks killed the trade.
+- `FAMILY_DEDUP_SKIP` with `policy=success_cooldown` means the family is waiting out the post-fill cooldown.
+- `FAMILY_DEDUP_SKIP` with `policy=success_repeat_limit` means the family reached the configured successful repeat count.
+- `FAMILY_DEDUP_SKIP` with `policy=hard_lock` means a clear soft-book limit/exposure or unavailable-market failure locked the family.
+
+Do not loosen matching or safety gates before checking these telemetry events.
+
 ## Repeated High-Percent Pinnacle Arbs
 
 Likely causes:
 
 - stale source odds;
 - period mismatch;
-- unsupported Pinnacle period mapped as `full_game`;
+- unsupported Pinnacle period entering the book;
 - three-way market mismatch;
 - team normalization mismatch;
 - spread sign issue.
 
-Current required fix:
+Current safety behavior:
 
-- Stop mapping unknown Pinnacle period numbers to `full_game`.
+- Unknown Pinnacle period numbers are skipped instead of mapped to `full_game`.
+- Non-full-game Pinnacle moneylines are skipped at parse time.
 
 Immediate checks:
 
 - Look at `venue_market_id`.
-- Check the Pinnacle period segment in IDs like `s;10;m`.
+- Check the Pinnacle period segment in IDs like `s;10;m`; only `s;0;m` is a full-game Pinnacle moneyline.
 - Compare the authenticated Pinnacle quote price against the scanned price.
 - Use `PIN_ODDS_SOURCE=auth` for live testing.
 

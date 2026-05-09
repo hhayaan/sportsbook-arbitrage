@@ -50,7 +50,8 @@ pub fn check_gates(
     if plan.leg1_stake < min_stake || plan.leg2_stake < min_stake {
         failures.push(format!(
             "min_stake: ${:.2} < ${:.2}",
-            plan.leg1_stake.min(plan.leg2_stake), min_stake
+            plan.leg1_stake.min(plan.leg2_stake),
+            min_stake
         ));
     }
 

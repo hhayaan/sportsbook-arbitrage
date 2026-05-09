@@ -62,6 +62,8 @@ DraftKings:
 FanDuel:
 
 - Rust fetches public Ontario content endpoints.
+- FanDuel soccer is fetched as one event type, then supported competitions are mapped to the same league namespaces used by DK/PIN: `MLS`, `EPL`, `LA_LIGA`, `SERIE_A`, `BUNDESLIGA`, `LIGUE_1`, and `UCL`.
+- Unsupported FD soccer competitions are skipped.
 - FanDuel authenticated session checks happen only during live validation/cashout.
 
 Pinnacle:
@@ -83,7 +85,7 @@ MLB:2026-05-07T19:COL-vs-NYM
 
 The team pair is sorted. It is a cross-book identity key, not an away/home declaration.
 
-Period labels are normalized in the fetcher. Current required fix: unsupported Pinnacle period numbers must not silently become `full_game`.
+Period labels are normalized in the fetcher. Unsupported Pinnacle period numbers are skipped instead of silently becoming `full_game`, and non-full-game Pinnacle moneylines are dropped before detection.
 
 ## Detection
 
@@ -108,6 +110,17 @@ arb_pct = 1 - sigma
 
 Only `sigma < 1.0` can trade.
 
+Optional detector diagnostics are written to telemetry when `DETECTOR_TELEMETRY=1` or `DETECTOR_DIAGNOSTICS=1`:
+
+- `DETECTOR_MARKET_COUNTS` counts source markets by venue, sport, market type, and period.
+- `DETECTOR_FUNNEL_SUMMARY` counts shared identity keys, complementary pairs, rejects, near misses, and candidates by venue pair.
+- `DETECTOR_PIN_PAIR_SNAPSHOT` records compact Pinnacle-involved candidate and near-miss rows, including venue event IDs and venue market IDs.
+- `DETECTOR_CANDIDATE` and `DETECTOR_CANDIDATE_SUMMARY` show candidates before and after the min-edge threshold.
+- `MIN_EDGE_SKIPPED` records candidates that were detected but skipped by configured edge.
+- `FAMILY_DEDUP_PASSED` and `FAMILY_DEDUP_SKIP` show whether the live-fire family gate allowed or blocked the candidate.
+- `FAMILY_DEDUP_LOCKED` records hard locks from clear soft-book limit/exposure or unavailable-market failures.
+- `FAMILY_DEDUP_SUCCESS_RECORDED` records successful-fill repeat state.
+
 ## Pre-Execution Gates
 
 Before an executor is called, the main loop:
@@ -121,9 +134,10 @@ Before an executor is called, the main loop:
 7. Emits a warning for very high arb percentages.
 8. Skips live markets when `SKIP_LIVE=1`.
 9. Skips pregame events farther than `MAX_HOURS_TO_START`, default 24 hours.
-10. Applies persistent family-scope dedup for actual live WebSocket execution.
-11. Requires `settings.enabled`.
-12. Calls paper or live execution.
+10. Requires `settings.enabled`.
+11. In live mode, applies `LIVE_ALLOWED_PAIRS` if set; this is placement-only and does not affect scanning or `[ARB]` terminal output.
+12. Applies persistent family-scope dedup for actual live WebSocket execution.
+13. Calls paper or live execution.
 
 The family dedup key is:
 
@@ -131,7 +145,7 @@ The family dedup key is:
 sport + event_id + soft_venue + market_type + period
 ```
 
-The key is order-independent for Pinnacle/soft-book pairs and intentionally excludes line and side. A successful live fill locks the family. A non-retryable soft leg-1 rejection, such as DK `MaxExposureReached`, also locks the family. Locks are stored in `data/family-dedup.json` by default and use a 6-hour TTL unless overridden. Paper/scan runs do not write persistent family locks.
+The key is order-independent for Pinnacle/soft-book pairs and intentionally excludes line and side. A successful live fill records the family, starts a 30-second success cooldown by default, and allows up to 3 successful repeats after the first fill. Clear soft leg-1 limit/exposure or unavailable-market failures hard-lock the family for the 6-hour TTL. Generic `PurchaseNotAccepted`, slippage, stale IDs, auth/browser/network errors, insufficient funds, Pinnacle quote failures, and Pinnacle placement failures do not hard-lock the family. State is stored in `data/family-dedup.json` by default. Paper/scan runs do not write persistent family state.
 
 ## Stake Sizing
 
@@ -174,19 +188,18 @@ Current live steps for Pinnacle-backed arbs:
 1. Check minimum arb percent.
 2. Read SQLite balances.
 3. Compute a stake plan with the soft-book cap.
-4. Place the non-Pinnacle soft book first when Pinnacle is the hedge.
-5. Send Pinnacle `quote_bet`.
-6. Validate quote price/min/max.
-7. Adjust stake plan to quote constraints when needed.
-8. Send DK/FD `validate_soft` for the soft leg.
-9. Recompute sigma using fresh soft price.
-10. Send final short Pinnacle pre-fire quote before soft risk.
-11. Send soft leg `place_bet`.
-12. Drain balance updates.
-13. Recompute Pinnacle hedge from actual filled soft stake/odds.
-14. Send Pinnacle `place_bet`.
-15. Drain balance updates.
-16. Insert status `executed_live` only after both legs fill.
+4. Send Pinnacle `quote_bet`.
+5. Validate quote price/min/max.
+6. Adjust stake plan to quote constraints when needed.
+7. Send DK/FD `validate_soft` for the soft leg.
+8. Recompute sigma using fresh soft price.
+9. Send final short Pinnacle pre-fire quote before soft risk.
+10. Send soft leg `place_bet`.
+11. Drain balance updates.
+12. Recompute Pinnacle hedge from actual filled soft stake/odds.
+13. Send Pinnacle `place_bet`.
+14. Drain balance updates.
+15. Insert status `executed_live` only after both legs fill.
 
 Fill outcomes are automated:
 
@@ -263,6 +276,7 @@ The monitor:
 ## Current Work To Do
 
 - Decide whether true ladder buckets or an edge-improvement gate are needed after low-stake family-dedup testing.
-- Fix unsupported Pinnacle period handling so unknown periods do not become full-game markets.
+- Review FD/PIN detector telemetry before changing non-soccer normalization or adding FD authenticated scan overlay.
+- Keep adding replay fixtures for unsupported Pinnacle period handling so unknown periods cannot become full-game markets again.
 - Add or improve terminal visibility for recovery cashout actions.
 - Add incident replay fixtures for real live failures.

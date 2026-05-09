@@ -1,4 +1,4 @@
-use crate::models::{Book, MarketIdentityKey, VenueSelectionKey, ArbCandidate};
+use crate::models::{ArbCandidate, Book, MarketIdentityKey, VenueSelectionKey};
 
 /// Verify both legs' odds haven't drifted beyond threshold since detection.
 pub fn verify_both_legs(
@@ -19,8 +19,18 @@ pub fn verify_leg(
     max_drift: f64,
 ) -> Result<f64, String> {
     let (venue, selection, expected_odds, leg_label) = match leg_num {
-        1 => (&candidate.leg1_venue, &candidate.leg1_selection, candidate.leg1_odds, "leg1"),
-        2 => (&candidate.leg2_venue, &candidate.leg2_selection, candidate.leg2_odds, "leg2"),
+        1 => (
+            &candidate.leg1_venue,
+            &candidate.leg1_selection,
+            candidate.leg1_odds,
+            "leg1",
+        ),
+        2 => (
+            &candidate.leg2_venue,
+            &candidate.leg2_selection,
+            candidate.leg2_odds,
+            "leg2",
+        ),
         _ => unreachable!(),
     };
 
@@ -44,18 +54,18 @@ pub fn verify_leg(
         player_key: String::new(),
     };
 
-    let entries = book.get_entries(&identity_key).ok_or_else(|| {
-        format!("{}: market no longer in book", leg_label)
-    })?;
+    let entries = book
+        .get_entries(&identity_key)
+        .ok_or_else(|| format!("{}: market no longer in book", leg_label))?;
 
     let vs_key = VenueSelectionKey {
         venue: venue.clone(),
         selection: selection.clone(),
     };
 
-    let entry = entries.get(&vs_key).ok_or_else(|| {
-        format!("{}: {}/{} no longer in book", leg_label, venue, selection)
-    })?;
+    let entry = entries
+        .get(&vs_key)
+        .ok_or_else(|| format!("{}: {}/{} no longer in book", leg_label, venue, selection))?;
 
     let current_odds = entry.decimal_odds;
     let drift_pct = (current_odds - expected_odds).abs() / expected_odds;
@@ -63,7 +73,11 @@ pub fn verify_leg(
     if drift_pct > max_drift {
         return Err(format!(
             "{}: odds drifted {:.1}% (expected={:.3}, current={:.3}, max={:.1}%)",
-            leg_label, drift_pct * 100.0, expected_odds, current_odds, max_drift * 100.0
+            leg_label,
+            drift_pct * 100.0,
+            expected_odds,
+            current_odds,
+            max_drift * 100.0
         ));
     }
 
@@ -115,8 +129,11 @@ mod tests {
             leg2_odds: odds2,
             leg2_received_at_ms: 1000,
             leg2_venue_market_id: "fd-ml".into(),
-            sigma, arb_pct: 1.0 - sigma, roi: 1.0 / sigma - 1.0,
-            line: None, is_live: false,
+            sigma,
+            arb_pct: 1.0 - sigma,
+            roi: 1.0 / sigma - 1.0,
+            line: None,
+            is_live: false,
         }
     }
 

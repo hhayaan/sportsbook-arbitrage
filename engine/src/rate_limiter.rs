@@ -22,7 +22,11 @@ impl RateLimiter {
 
     /// Check if a bet can be placed on this venue. Returns Ok(()) or Err((current_count, max)).
     pub fn check(&self, venue: &str) -> Result<(), (u32, u32)> {
-        let max = self.limits.get(venue).copied().unwrap_or(self.default_limit);
+        let max = self
+            .limits
+            .get(venue)
+            .copied()
+            .unwrap_or(self.default_limit);
         let count = self.windows.get(venue).map(|w| w.len() as u32).unwrap_or(0);
         if count >= max {
             Err((count, max))
@@ -78,10 +82,7 @@ mod tests {
 
     #[test]
     fn test_per_venue_isolation() {
-        let mut rl = RateLimiter::new(
-            HashMap::from([("dk".into(), 2), ("fd".into(), 2)]),
-            2,
-        );
+        let mut rl = RateLimiter::new(HashMap::from([("dk".into(), 2), ("fd".into(), 2)]), 2);
         rl.record("dk");
         rl.record("dk");
         assert!(rl.check("dk").is_err());

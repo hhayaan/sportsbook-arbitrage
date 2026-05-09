@@ -239,7 +239,11 @@ pub async fn fetch_balances(
         if let Some(text) = msg {
             if let Ok(resp) = serde_json::from_str::<BalancesResponse>(&text) {
                 if resp.msg_type.as_deref() == Some("balances") {
-                    return Ok(resp.balances.into_iter().map(|b| (b.venue, b.balance)).collect());
+                    return Ok(resp
+                        .balances
+                        .into_iter()
+                        .map(|b| (b.venue, b.balance))
+                        .collect());
                 }
             }
         }
@@ -308,7 +312,15 @@ pub async fn quote_leg(
     venue_market_id: &str,
 ) -> Result<(f64, f64, f64), String> {
     let timeout_ms = env_u64("QUOTE_TIMEOUT_MS", 10000);
-    quote_leg_with_timeout_ms(writer, reader, attempt_id, venue, venue_market_id, timeout_ms).await
+    quote_leg_with_timeout_ms(
+        writer,
+        reader,
+        attempt_id,
+        venue,
+        venue_market_id,
+        timeout_ms,
+    )
+    .await
 }
 
 async fn validate_soft_book(
@@ -824,7 +836,11 @@ async fn attempt_recovery(
                     match AuthenticatedQuote::new(price, min_stake, max_stake) {
                         Ok(q) => q,
                         Err(e) => {
-                            emit_attempt("RESCUE_QUOTE_INVALID", attempt_id, json!({ "market": try_id, "error": e }));
+                            emit_attempt(
+                                "RESCUE_QUOTE_INVALID",
+                                attempt_id,
+                                json!({ "market": try_id, "error": e }),
+                            );
                             continue;
                         }
                     }
@@ -1013,7 +1029,8 @@ async fn attempt_recovery(
                 cashout_resolved = matches!(
                     class,
                     CashoutConfirmation::ConfirmedCashout | CashoutConfirmation::TerminalNonCashout
-                ) || (result.success == Some(true) && result.confirmed == Some(true));
+                ) || (result.success == Some(true)
+                    && result.confirmed == Some(true));
             }
             Err(e) => emit_attempt("CASHOUT_ERROR", attempt_id, json!({ "error": e })),
         }
@@ -1131,7 +1148,7 @@ pub async fn monitor_naked_legs(
 
         if !resolved {
             if let (Some(pin_id), Some(pin_selection)) =
-            (leg.pin_venue_market_id.clone(), leg.pin_selection.clone())
+                (leg.pin_venue_market_id.clone(), leg.pin_selection.clone())
             {
                 if !pin_yank::is_blacklisted(&pin_id) {
                     if let Ok((min_stake, max_quote_stake, price)) = quote_leg_with_timeout_ms(
@@ -1206,7 +1223,9 @@ pub async fn monitor_naked_legs(
             }
         }
 
-        if !resolved && cashout_offer.is_some() && (leg.purchase_id.is_some() || leg.bet_id.is_some())
+        if !resolved
+            && cashout_offer.is_some()
+            && (leg.purchase_id.is_some() || leg.bet_id.is_some())
         {
             match cashout_bet(
                 writer,
@@ -1257,7 +1276,11 @@ pub async fn monitor_naked_legs(
 
         if resolved {
             let _ = naked_legs::remove_naked_leg(&leg.id);
-            emit_attempt("NAKED_LEG_RESOLVED", &leg.attempt_id, json!({ "id": leg.id }));
+            emit_attempt(
+                "NAKED_LEG_RESOLVED",
+                &leg.attempt_id,
+                json!({ "id": leg.id }),
+            );
         } else {
             leg.updated_at = now_iso();
             leg.last_checked_at = Some(now_iso());
@@ -1295,6 +1318,23 @@ pub async fn try_execute(
 
     let min_arb_pct = settings.min_arb_pct / 100.0;
     if candidate.arb_pct < min_arb_pct {
+        if crate::detector_telemetry::enabled() {
+            let _ = attempt_telemetry::emit_event(
+                "MIN_EDGE_SKIPPED",
+                None,
+                json!({
+                    "event_id": candidate.event_id,
+                    "sport": candidate.sport,
+                    "market_type": candidate.market_type,
+                    "period": candidate.period,
+                    "venue_pair": candidate_venue_pair(candidate),
+                    "soft_venue": candidate_soft_venue(candidate),
+                    "arb_pct": candidate.arb_pct,
+                    "min_arb_pct": min_arb_pct,
+                    "sigma": candidate.sigma,
+                }),
+            );
+        }
         return None;
     }
 
@@ -1342,6 +1382,10 @@ pub async fn try_execute(
             "line": candidate.line,
             "arb_pct": candidate.arb_pct,
             "sigma": candidate.sigma,
+            "venue_pair": candidate_venue_pair(candidate),
+            "soft_venue": candidate_soft_venue(candidate),
+            "leg1_venue": candidate.leg1_venue,
+            "leg2_venue": candidate.leg2_venue,
         }),
     );
 
@@ -1417,12 +1461,30 @@ pub async fn try_execute(
         }
 
         let (pin_venue, pin_mkt_id, soft_stake, soft_odds) = if first_venue == "pinnacle" {
-            (first_venue.as_str(), &first_mkt_id, second_stake, second_odds)
+            (
+                first_venue.as_str(),
+                &first_mkt_id,
+                second_stake,
+                second_odds,
+            )
         } else {
-            (second_venue.as_str(), &second_mkt_id, first_stake, first_odds)
+            (
+                second_venue.as_str(),
+                &second_mkt_id,
+                first_stake,
+                first_odds,
+            )
         };
 
-        match quote_leg(writer, reader, &format!("{}-Q", attempt_id), pin_venue, pin_mkt_id).await {
+        match quote_leg(
+            writer,
+            reader,
+            &format!("{}-Q", attempt_id),
+            pin_venue,
+            pin_mkt_id,
+        )
+        .await
+        {
             Ok((min_stake, max_stake, quoted_price)) => {
                 let quote = match AuthenticatedQuote::new(quoted_price, min_stake, max_stake) {
                     Ok(q) => q,
@@ -1436,7 +1498,9 @@ pub async fn try_execute(
                 let hedge = match compute_pin_hedge_from_soft_fill(soft_stake, soft_odds, quote) {
                     Some(h) => h,
                     None => {
-                        tracing::info!("[PIN QUOTE] Could not compute hedge from authenticated quote");
+                        tracing::info!(
+                            "[PIN QUOTE] Could not compute hedge from authenticated quote"
+                        );
                         emit_attempt("PIN_QUOTE_MATH_FAILED", &attempt_id, json!({}));
                         return None;
                     }
@@ -1550,7 +1614,11 @@ pub async fn try_execute(
                         let Some(hedge) =
                             compute_pin_hedge_from_soft_fill(first_stake, first_odds, quote)
                         else {
-                            emit_attempt("SOFT_VALIDATED_HEDGE_MATH_FAILED", &attempt_id, json!({}));
+                            emit_attempt(
+                                "SOFT_VALIDATED_HEDGE_MATH_FAILED",
+                                &attempt_id,
+                                json!({}),
+                            );
                             return None;
                         };
                         if hedge.sigma >= 1.0 || hedge.guaranteed_profit < -0.0001 {
@@ -1593,7 +1661,8 @@ pub async fn try_execute(
         .await
         {
             PinPrefireDecision::Passed(quote) => {
-                if let Some(hedge) = compute_pin_hedge_from_soft_fill(first_stake, first_odds, quote)
+                if let Some(hedge) =
+                    compute_pin_hedge_from_soft_fill(first_stake, first_odds, quote)
                 {
                     if hedge.pin_stake > second_balance {
                         emit_attempt(
@@ -1679,8 +1748,13 @@ pub async fn try_execute(
         Ok(f) => {
             let err = f.error_message.unwrap_or_default();
             tracing::error!("LEG 1 FAILED: {} - {}.", f.status, err);
-            emit_attempt("LEG1_FAILED", &attempt_id, json!({ "status": f.status, "error": err }));
-            if let Some(reason) = family_lock_reason_for_leg1_failure(first_venue, &f.status, &err) {
+            emit_attempt(
+                "LEG1_FAILED",
+                &attempt_id,
+                json!({ "status": f.status, "error": err }),
+            );
+            if let Some(reason) = family_lock_reason_for_leg1_failure(first_venue, &f.status, &err)
+            {
                 return Some(ExecutionResult::family_lock(reason));
             }
             return None;
@@ -1718,7 +1792,9 @@ pub async fn try_execute(
                 Some(h) => h,
                 None => {
                     let reason = "post_fill_pin_hedge_math_failed";
-                    tracing::warn!("[POST-FILL] Could not recompute PIN hedge from actual soft fill");
+                    tracing::warn!(
+                        "[POST-FILL] Could not recompute PIN hedge from actual soft fill"
+                    );
                     attempt_recovery(
                         writer,
                         reader,
@@ -2060,15 +2136,51 @@ fn family_lock_reason_for_leg1_failure(
         || text.contains("customerlimitserror")
     {
         "max_exposure_reached"
-    } else if text.contains("declined") {
-        "declined"
-    } else if text.contains("purchasenotaccepted") || text.contains("purchase not accepted") {
-        "purchase_not_accepted"
+    } else if is_stake_limit_leg1_failure(&text) {
+        "stake_limit"
+    } else if is_closed_or_unavailable_leg1_failure(&text) {
+        "market_unavailable"
     } else {
-        "nonretryable_leg1_failure"
+        return None;
     };
 
     Some(format!("{}_{}", venue, class))
+}
+
+fn is_stake_limit_leg1_failure(message: &str) -> bool {
+    [
+        "stake exceeds",
+        "exceeds maximum",
+        "exceeds the maximum",
+        "max stake",
+        "maximum stake",
+        "stake limit",
+        "limit exceeded",
+        "wager limit",
+        "maximum wager",
+        "above allowed max",
+        "above the allowed max",
+        "stake is greater than",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+fn is_closed_or_unavailable_leg1_failure(message: &str) -> bool {
+    [
+        "market suspended",
+        "selection suspended",
+        "market unavailable",
+        "selection unavailable",
+        "event closed",
+        "market closed",
+        "betting closed",
+        "wagering closed",
+        "no longer available",
+        "currently unavailable",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 fn is_retryable_leg1_failure(message: &str) -> bool {
@@ -2093,6 +2205,22 @@ fn is_retryable_leg1_failure(message: &str) -> bool {
     ]
     .iter()
     .any(|needle| text.contains(needle))
+}
+
+fn candidate_soft_venue(candidate: &ArbCandidate) -> &str {
+    if candidate.leg1_venue == "pinnacle" {
+        &candidate.leg2_venue
+    } else {
+        &candidate.leg1_venue
+    }
+}
+
+fn candidate_venue_pair(candidate: &ArbCandidate) -> String {
+    if candidate.leg1_venue <= candidate.leg2_venue {
+        format!("{}/{}", candidate.leg1_venue, candidate.leg2_venue)
+    } else {
+        format!("{}/{}", candidate.leg2_venue, candidate.leg1_venue)
+    }
 }
 
 #[cfg(test)]
@@ -2138,10 +2266,7 @@ mod tests {
 
         let fill: FillReport = serde_json::from_str(raw).expect("numeric bet_id should parse");
         assert_eq!(fill.bet_id.as_deref(), Some("2232298295"));
-        assert_eq!(
-            fill.attempt_id,
-            "6683e2e7-e0d7-47c1-ac81-28c4398be5e8-L2"
-        );
+        assert_eq!(fill.attempt_id, "6683e2e7-e0d7-47c1-ac81-28c4398be5e8-L2");
     }
 
     #[test]
@@ -2159,6 +2284,36 @@ mod tests {
         let reason =
             family_lock_reason_for_leg1_failure("draftkings", "error", "AUTH_INVALID unauthorized");
         assert!(reason.is_none());
+    }
+
+    #[test]
+    fn generic_purchase_not_accepted_does_not_lock_family() {
+        let reason = family_lock_reason_for_leg1_failure(
+            "draftkings",
+            "rejected",
+            r#"placeBets failed (422): {"statusCode":"PurchaseNotAccepted","description":"PurchaseNotAccepted","response":{"bets":[{"declineReasons":[{"name":"PotentialReturnsCalculation","reason":"The posted potential returns are not calculated correctly."}]}]}}"#,
+        );
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn stake_limit_leg1_failure_locks_family() {
+        let reason = family_lock_reason_for_leg1_failure(
+            "fanduel",
+            "rejected",
+            "stake exceeds maximum stake for this selection",
+        );
+        assert_eq!(reason.as_deref(), Some("fanduel_stake_limit"));
+    }
+
+    #[test]
+    fn unavailable_market_leg1_failure_locks_family() {
+        let reason = family_lock_reason_for_leg1_failure(
+            "draftkings",
+            "rejected",
+            "market suspended: selection unavailable",
+        );
+        assert_eq!(reason.as_deref(), Some("draftkings_market_unavailable"));
     }
 
     #[test]

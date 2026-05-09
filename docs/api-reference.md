@@ -433,6 +433,20 @@ Soccer:
 GET https://sbapi.on.sportsbook.fanduel.ca/api/content-managed-page?page=SPORT&eventTypeId=1&_ak=FhMFpcPWXMeyZxOx
 ```
 
+FD soccer is parsed by competition metadata before canonical event IDs are built. Supported competition names map to the current league namespaces:
+
+| FanDuel competition | Canonical sport |
+| --- | --- |
+| `US MLS`, `Major League Soccer`, `MLS` | `MLS` |
+| `English Premier League`, `England Premier League`, `Premier League` | `EPL` |
+| `Spanish La Liga`, `Spain La Liga`, `La Liga` | `LA_LIGA` |
+| `Italian Serie A`, `Serie A` | `SERIE_A` |
+| `German Bundesliga`, `Bundesliga` | `BUNDESLIGA` |
+| `French Ligue 1`, `Ligue 1` | `LIGUE_1` |
+| `UEFA Champions League`, `Champions League` | `UCL` |
+
+Unsupported FD soccer competitions are skipped.
+
 ### Pinnacle Authenticated Odds
 
 Rust local bridge:
@@ -532,6 +546,7 @@ Rust:
 | `NAKED_LEG_MONITOR_CYCLES` | Naked-leg monitor interval in poll cycles | 10 |
 | `ODDS_FETCH_TIMEOUT_MS` | Per-odds-request deadline | 2500 |
 | `WS_URL` | Bet placer WebSocket URL | `ws://127.0.0.1:3402` |
+| `LIVE_ALLOWED_PAIRS` | Optional comma-separated live placement pair allowlist, for example `fanduel/pinnacle`; scanning still includes all fetched venues | unset / all pairs |
 | `PIN_ODDS_SOURCE` | `auth`, `authenticated`, `logged-in`, `logged_in`, `guest`, or `public` | `auth` |
 | `PIN_AUTH_ODDS_BASE_URL` | Pinnacle auth odds bridge | `http://127.0.0.1:3404` |
 | `QUOTE_TIMEOUT_MS` | General quote timeout | 10000 |
@@ -543,6 +558,12 @@ Rust:
 | `PIN_PREFIRE_RECHECK_ENABLED` | Enable final PIN recheck | true |
 | `PIN_PREFIRE_RECHECK_TIMEOUT_MS` | Final PIN recheck timeout | 1500 |
 | `PIN_YANK_BLACKLIST_MS` | Exact-market hard-yank TTL | 1800000 |
+| `FAMILY_DEDUP_FILE` | Family dedup state path | `data/family-dedup.json` |
+| `FAMILY_DEDUP_TTL_MS` | Family hard-lock and repeat-window TTL in milliseconds | 21600000 |
+| `FAMILY_DEDUP_TTL_SECS` | Family hard-lock and repeat-window TTL in seconds | unset |
+| `FAMILY_DEDUP_SUCCESS_COOLDOWN_MS` | Cooldown after successful two-leg fill in milliseconds | 30000 |
+| `FAMILY_DEDUP_SUCCESS_COOLDOWN_SECS` | Cooldown after successful two-leg fill in seconds | unset |
+| `FAMILY_DEDUP_SUCCESS_MAX_REPEATS` | Successful repeats allowed after first fill | 3 |
 | `RESCUE_PIN_HARD_YANK_THRESHOLD` | Rescue hard-yank threshold | 3 |
 | `RESCUE_QUOTE_TIMEOUT_MS` | Rescue quote timeout | 3000 |
 | `MAX_RESCUE_LOSS` | Optional rescue-loss cap | unset |
@@ -551,6 +572,10 @@ Rust:
 | `NAKED_LEG_PIN_RECHECK_QUOTE_TIMEOUT_MS` | Monitor relist quote timeout | 3000 |
 | `ATTEMPT_TELEMETRY_DIR` | Telemetry root | `data` |
 | `NAKED_LEGS_FILE` | Naked-leg ledger | `data/naked-legs.json` |
+| `DETECTOR_TELEMETRY` | Enable detector JSONL diagnostics | false |
+| `DETECTOR_DIAGNOSTICS` | Alias for detector diagnostics | false |
+| `DETECTOR_SNAPSHOT_LIMIT` | Max detector snapshots per poll | 50 |
+| `DETECTOR_NEAR_MISS_SIGMA_MAX` | Highest near-miss sigma snapshot | 1.02 |
 
 Node:
 

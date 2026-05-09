@@ -42,11 +42,24 @@ impl Treasury {
         tracing::info!(venue = %venue, balance = initial_balance, "Treasury: venue initialized");
     }
 
-    pub fn initialize_venue_with_balance(&self, venue: &str, free: f64, reserved: f64, in_flight: f64, initial: f64) {
+    pub fn initialize_venue_with_balance(
+        &self,
+        venue: &str,
+        free: f64,
+        reserved: f64,
+        in_flight: f64,
+        initial: f64,
+    ) {
         let mut balances = self.balances.lock().unwrap();
         balances.insert(
             venue.to_string(),
-            VenueBalance { venue: venue.to_string(), free, reserved, in_flight, initial },
+            VenueBalance {
+                venue: venue.to_string(),
+                free,
+                reserved,
+                in_flight,
+                initial,
+            },
         );
         tracing::info!(venue = %venue, free, reserved, in_flight, initial, "Treasury: restored");
     }
@@ -54,9 +67,14 @@ impl Treasury {
     /// Reserve capital: free → reserved
     pub fn reserve(&self, venue: &str, amount: f64) -> Result<(), String> {
         let mut balances = self.balances.lock().unwrap();
-        let b = balances.get_mut(venue).ok_or_else(|| format!("Unknown venue: {}", venue))?;
+        let b = balances
+            .get_mut(venue)
+            .ok_or_else(|| format!("Unknown venue: {}", venue))?;
         if b.free < amount {
-            return Err(format!("{}: free=${:.2} < required=${:.2}", venue, b.free, amount));
+            return Err(format!(
+                "{}: free=${:.2} < required=${:.2}",
+                venue, b.free, amount
+            ));
         }
         b.free -= amount;
         b.reserved += amount;
@@ -67,9 +85,14 @@ impl Treasury {
     /// Commit to execution: reserved → in_flight
     pub fn commit(&self, venue: &str, amount: f64) -> Result<(), String> {
         let mut balances = self.balances.lock().unwrap();
-        let b = balances.get_mut(venue).ok_or_else(|| format!("Unknown venue: {}", venue))?;
+        let b = balances
+            .get_mut(venue)
+            .ok_or_else(|| format!("Unknown venue: {}", venue))?;
         if b.reserved < amount - 0.01 {
-            return Err(format!("{}: reserved=${:.2} < commit=${:.2}", venue, b.reserved, amount));
+            return Err(format!(
+                "{}: reserved=${:.2} < commit=${:.2}",
+                venue, b.reserved, amount
+            ));
         }
         b.reserved -= amount;
         b.in_flight += amount;
@@ -80,7 +103,9 @@ impl Treasury {
     /// Fill confirmed: in_flight consumed
     pub fn fill(&self, venue: &str, amount: f64) -> Result<(), String> {
         let mut balances = self.balances.lock().unwrap();
-        let b = balances.get_mut(venue).ok_or_else(|| format!("Unknown venue: {}", venue))?;
+        let b = balances
+            .get_mut(venue)
+            .ok_or_else(|| format!("Unknown venue: {}", venue))?;
         b.in_flight -= amount;
         tracing::debug!(venue = %venue, amount, in_flight = b.in_flight, "Treasury: fill");
         Ok(())
@@ -89,7 +114,9 @@ impl Treasury {
     /// Release reserved capital back: reserved → free
     pub fn release(&self, venue: &str, amount: f64) -> Result<(), String> {
         let mut balances = self.balances.lock().unwrap();
-        let b = balances.get_mut(venue).ok_or_else(|| format!("Unknown venue: {}", venue))?;
+        let b = balances
+            .get_mut(venue)
+            .ok_or_else(|| format!("Unknown venue: {}", venue))?;
         b.reserved -= amount;
         b.free += amount;
         tracing::debug!(venue = %venue, amount, free = b.free, reserved = b.reserved, "Treasury: release");
@@ -99,7 +126,9 @@ impl Treasury {
     /// Credit winnings: add to free
     pub fn credit(&self, venue: &str, amount: f64) -> Result<(), String> {
         let mut balances = self.balances.lock().unwrap();
-        let b = balances.get_mut(venue).ok_or_else(|| format!("Unknown venue: {}", venue))?;
+        let b = balances
+            .get_mut(venue)
+            .ok_or_else(|| format!("Unknown venue: {}", venue))?;
         b.free += amount;
         tracing::debug!(venue = %venue, amount, free = b.free, "Treasury: credit");
         Ok(())

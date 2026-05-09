@@ -9,56 +9,194 @@ static TEAM_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|
         // ── NBA ────────────────────────────────────────────────────────
         ("ATL", &["atlanta hawks", "hawks", "atlanta", "atl"]),
         ("BOS", &["boston celtics", "celtics", "boston", "bos"]),
-        ("BKN", &["brooklyn nets", "nets", "brooklyn", "bkn", "bk nets"]),
+        (
+            "BKN",
+            &["brooklyn nets", "nets", "brooklyn", "bkn", "bk nets"],
+        ),
         ("CHA", &["charlotte hornets", "hornets", "charlotte", "cha"]),
         ("CHI", &["chicago bulls", "bulls", "chicago", "chi"]),
-        ("CLE", &["cleveland cavaliers", "cavaliers", "cavs", "cleveland", "cle"]),
-        ("DAL", &["dallas mavericks", "mavericks", "mavs", "dallas", "dal"]),
+        (
+            "CLE",
+            &[
+                "cleveland cavaliers",
+                "cavaliers",
+                "cavs",
+                "cleveland",
+                "cle",
+            ],
+        ),
+        (
+            "DAL",
+            &["dallas mavericks", "mavericks", "mavs", "dallas", "dal"],
+        ),
         ("DEN", &["denver nuggets", "nuggets", "denver", "den"]),
         ("DET", &["detroit pistons", "pistons", "detroit", "det"]),
-        ("GSW", &["golden state warriors", "warriors", "golden state", "gs warriors", "gsw", "gs"]),
+        (
+            "GSW",
+            &[
+                "golden state warriors",
+                "warriors",
+                "golden state",
+                "gs warriors",
+                "gsw",
+                "gs",
+            ],
+        ),
         ("HOU", &["houston rockets", "rockets", "houston", "hou"]),
         ("IND", &["indiana pacers", "pacers", "indiana", "ind"]),
-        ("LAC", &["los angeles clippers", "la clippers", "clippers", "lac"]),
+        (
+            "LAC",
+            &["los angeles clippers", "la clippers", "clippers", "lac"],
+        ),
         ("LAL", &["los angeles lakers", "la lakers", "lakers", "lal"]),
         ("MEM", &["memphis grizzlies", "grizzlies", "memphis", "mem"]),
         ("MIA", &["miami heat", "heat", "miami", "mia"]),
         ("MIL", &["milwaukee bucks", "bucks", "milwaukee", "mil"]),
-        ("MIN", &["minnesota timberwolves", "timberwolves", "wolves", "minnesota", "min"]),
-        ("NOP", &["new orleans pelicans", "pelicans", "new orleans", "nop", "no pelicans"]),
+        (
+            "MIN",
+            &[
+                "minnesota timberwolves",
+                "timberwolves",
+                "wolves",
+                "minnesota",
+                "min",
+            ],
+        ),
+        (
+            "NOP",
+            &[
+                "new orleans pelicans",
+                "pelicans",
+                "new orleans",
+                "nop",
+                "no pelicans",
+            ],
+        ),
         ("NYK", &["new york knicks", "knicks", "ny knicks", "nyk"]),
-        ("OKC", &["oklahoma city thunder", "thunder", "okc", "oklahoma city", "ok thunder"]),
+        (
+            "OKC",
+            &[
+                "oklahoma city thunder",
+                "thunder",
+                "okc",
+                "oklahoma city",
+                "ok thunder",
+            ],
+        ),
         ("ORL", &["orlando magic", "magic", "orlando", "orl"]),
-        ("PHI", &["philadelphia 76ers", "76ers", "sixers", "philadelphia", "phi", "philly"]),
+        (
+            "PHI",
+            &[
+                "philadelphia 76ers",
+                "76ers",
+                "sixers",
+                "philadelphia",
+                "phi",
+                "philly",
+            ],
+        ),
         ("PHX", &["phoenix suns", "suns", "phoenix", "phx"]),
-        ("POR", &["portland trail blazers", "trail blazers", "blazers", "portland", "por"]),
+        (
+            "POR",
+            &[
+                "portland trail blazers",
+                "trail blazers",
+                "blazers",
+                "portland",
+                "por",
+            ],
+        ),
         ("SAC", &["sacramento kings", "kings", "sacramento", "sac"]),
-        ("SAS", &["san antonio spurs", "spurs", "san antonio", "sas", "sa spurs"]),
+        (
+            "SAS",
+            &[
+                "san antonio spurs",
+                "spurs",
+                "san antonio",
+                "sas",
+                "sa spurs",
+            ],
+        ),
         ("TOR", &["toronto raptors", "raptors", "toronto", "tor"]),
         ("UTA", &["utah jazz", "jazz", "utah", "uta"]),
-        ("WAS", &["washington wizards", "wizards", "washington", "was"]),
-
+        (
+            "WAS",
+            &["washington wizards", "wizards", "washington", "was"],
+        ),
         // ── NFL ────────────────────────────────────────────────────────
-        ("ARI", &["arizona cardinals", "cardinals", "arizona", "ari", "az cardinals"]),
+        (
+            "ARI",
+            &[
+                "arizona cardinals",
+                "cardinals",
+                "arizona",
+                "ari",
+                "az cardinals",
+            ],
+        ),
         ("BAL", &["baltimore ravens", "ravens", "baltimore", "bal"]),
         ("BUF", &["buffalo bills", "bills", "buffalo", "buf"]),
         ("CAR", &["carolina panthers", "panthers", "carolina", "car"]),
-        ("CIN", &["cincinnati bengals", "bengals", "cincinnati", "cin"]),
-        ("GB",  &["green bay packers", "packers", "green bay", "gb"]),
-        ("JAX", &["jacksonville jaguars", "jaguars", "jacksonville", "jax"]),
-        ("KC",  &["kansas city chiefs", "chiefs", "kansas city", "kc"]),
-        ("LV",  &["las vegas raiders", "raiders", "las vegas", "lv", "oakland raiders"]),
+        (
+            "CIN",
+            &["cincinnati bengals", "bengals", "cincinnati", "cin"],
+        ),
+        ("GB", &["green bay packers", "packers", "green bay", "gb"]),
+        (
+            "JAX",
+            &["jacksonville jaguars", "jaguars", "jacksonville", "jax"],
+        ),
+        ("KC", &["kansas city chiefs", "chiefs", "kansas city", "kc"]),
+        (
+            "LV",
+            &[
+                "las vegas raiders",
+                "raiders",
+                "las vegas",
+                "lv",
+                "oakland raiders",
+            ],
+        ),
         ("LAR", &["los angeles rams", "la rams", "rams", "lar"]),
-        ("NE",  &["new england patriots", "patriots", "new england", "ne", "pats"]),
-        ("NO",  &["new orleans saints", "saints", "no saints"]),
+        (
+            "NE",
+            &[
+                "new england patriots",
+                "patriots",
+                "new england",
+                "ne",
+                "pats",
+            ],
+        ),
+        ("NO", &["new orleans saints", "saints", "no saints"]),
         ("NYG", &["new york giants", "giants", "ny giants", "nyg"]),
         ("NYJ", &["new york jets", "jets", "ny jets", "nyj"]),
-        ("PIT", &["pittsburgh steelers", "steelers", "pittsburgh", "pit"]),
-        ("SF",  &["san francisco 49ers", "49ers", "niners", "san francisco", "sf"]),
+        (
+            "PIT",
+            &["pittsburgh steelers", "steelers", "pittsburgh", "pit"],
+        ),
+        (
+            "SF",
+            &[
+                "san francisco 49ers",
+                "49ers",
+                "niners",
+                "san francisco",
+                "sf",
+            ],
+        ),
         ("SEA", &["seattle seahawks", "seahawks", "seattle", "sea"]),
-        ("TB",  &["tampa bay buccaneers", "buccaneers", "bucs", "tampa bay", "tb"]),
+        (
+            "TB",
+            &[
+                "tampa bay buccaneers",
+                "buccaneers",
+                "bucs",
+                "tampa bay",
+                "tb",
+            ],
+        ),
         ("TEN", &["tennessee titans", "titans", "tennessee", "ten"]),
-
         // ── NHL ────────────────────────────────────────────────────────
         ("ANA", &["anaheim ducks", "ducks", "anaheim", "ana"]),
         ("BOS-NHL", &["boston bruins", "bruins"]),
@@ -66,33 +204,68 @@ static TEAM_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|
         ("CGY", &["calgary flames", "flames", "calgary", "cgy"]),
         ("CAR-NHL", &["carolina hurricanes", "hurricanes", "canes"]),
         ("CHI-NHL", &["chicago blackhawks", "blackhawks", "hawks"]),
-        ("COL", &["colorado avalanche", "avalanche", "avs", "colorado", "col"]),
-        ("CBJ", &["columbus blue jackets", "blue jackets", "columbus", "cbj"]),
+        (
+            "COL",
+            &["colorado avalanche", "avalanche", "avs", "colorado", "col"],
+        ),
+        (
+            "CBJ",
+            &["columbus blue jackets", "blue jackets", "columbus", "cbj"],
+        ),
         ("DAL-NHL", &["dallas stars", "stars"]),
         ("DET-NHL", &["detroit red wings", "red wings"]),
         ("EDM", &["edmonton oilers", "oilers", "edmonton", "edm"]),
-        ("FLA", &["florida panthers", "fla panthers", "florida", "fla"]),
+        (
+            "FLA",
+            &["florida panthers", "fla panthers", "florida", "fla"],
+        ),
         ("LAK", &["los angeles kings", "la kings", "lak"]),
         ("MIN-NHL", &["minnesota wild", "wild"]),
-        ("MTL", &["montreal canadiens", "canadiens", "habs", "montreal", "mtl"]),
-        ("NSH", &["nashville predators", "predators", "preds", "nashville", "nsh"]),
+        (
+            "MTL",
+            &["montreal canadiens", "canadiens", "habs", "montreal", "mtl"],
+        ),
+        (
+            "NSH",
+            &[
+                "nashville predators",
+                "predators",
+                "preds",
+                "nashville",
+                "nsh",
+            ],
+        ),
         ("NJD", &["new jersey devils", "devils", "nj devils", "njd"]),
-        ("NYI", &["new york islanders", "islanders", "ny islanders", "nyi"]),
+        (
+            "NYI",
+            &["new york islanders", "islanders", "ny islanders", "nyi"],
+        ),
         ("NYR", &["new york rangers", "rangers", "ny rangers", "nyr"]),
-        ("OTT", &["ottawa senators", "senators", "sens", "ottawa", "ott"]),
+        (
+            "OTT",
+            &["ottawa senators", "senators", "sens", "ottawa", "ott"],
+        ),
         ("PHI-NHL", &["philadelphia flyers", "flyers"]),
         ("PIT-NHL", &["pittsburgh penguins", "penguins", "pens"]),
         ("SJS", &["san jose sharks", "sharks", "san jose", "sjs"]),
-        ("STL", &["st louis blues", "blues", "st. louis blues", "stl"]),
+        (
+            "STL",
+            &["st louis blues", "blues", "st. louis blues", "stl"],
+        ),
         ("TBL", &["tampa bay lightning", "lightning", "tbl"]),
         ("TOR-NHL", &["toronto maple leafs", "maple leafs", "leafs"]),
         ("VAN", &["vancouver canucks", "canucks", "vancouver", "van"]),
-        ("VGK", &["vegas golden knights", "golden knights", "vegas", "vgk"]),
+        (
+            "VGK",
+            &["vegas golden knights", "golden knights", "vegas", "vgk"],
+        ),
         ("WPG", &["winnipeg jets", "wpg jets", "winnipeg", "wpg"]),
         ("WSH", &["washington capitals", "capitals", "caps", "wsh"]),
-
         // ── MLB ────────────────────────────────────────────────────────
-        ("ARI-MLB", &["arizona diamondbacks", "diamondbacks", "dbacks", "d-backs"]),
+        (
+            "ARI-MLB",
+            &["arizona diamondbacks", "diamondbacks", "dbacks", "d-backs"],
+        ),
         ("ATL-MLB", &["atlanta braves", "braves"]),
         ("BAL-MLB", &["baltimore orioles", "orioles"]),
         ("BOS-MLB", &["boston red sox", "red sox"]),
@@ -105,30 +278,46 @@ static TEAM_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|
         ("HOU-MLB", &["houston astros", "astros"]),
         ("KC-MLB", &["kansas city royals", "royals"]),
         ("LAA", &["los angeles angels", "la angels", "angels", "laa"]),
-        ("LAD", &["los angeles dodgers", "la dodgers", "dodgers", "lad"]),
+        (
+            "LAD",
+            &["los angeles dodgers", "la dodgers", "dodgers", "lad"],
+        ),
         ("MIA-MLB", &["miami marlins", "marlins"]),
         ("MIL-MLB", &["milwaukee brewers", "brewers"]),
         ("MIN-MLB", &["minnesota twins", "twins"]),
         ("NYM", &["new york mets", "mets", "ny mets", "nym"]),
         ("NYY", &["new york yankees", "yankees", "ny yankees", "nyy"]),
-        ("OAK", &["oakland athletics", "athletics", "oakland", "oak", "a's"]),
+        (
+            "OAK",
+            &["oakland athletics", "athletics", "oakland", "oak", "a's"],
+        ),
         ("PHI-MLB", &["philadelphia phillies", "phillies"]),
         ("PIT-MLB", &["pittsburgh pirates", "pirates"]),
-        ("SD",  &["san diego padres", "padres", "san diego", "sd"]),
+        ("SD", &["san diego padres", "padres", "san diego", "sd"]),
         ("SF-MLB", &["san francisco giants", "sf giants"]),
         ("SEA-MLB", &["seattle mariners", "mariners"]),
-        ("STL-MLB", &["st louis cardinals", "st. louis cardinals", "stl cardinals"]),
+        (
+            "STL-MLB",
+            &["st louis cardinals", "st. louis cardinals", "stl cardinals"],
+        ),
         ("TB-MLB", &["tampa bay rays", "rays"]),
         ("TEX", &["texas rangers", "tex rangers", "texas", "tex"]),
         ("TOR-MLB", &["toronto blue jays", "blue jays"]),
         ("WSH-MLB", &["washington nationals", "nationals", "nats"]),
-
         // ── Soccer (EPL + MLS) ─────────────────────────────────────────
         ("ARS", &["arsenal", "arsenal fc", "ars"]),
         ("AVL", &["aston villa", "villa", "avl"]),
         ("BOU", &["afc bournemouth", "bournemouth", "bou"]),
         ("BRE", &["brentford", "brentford fc", "bre"]),
-        ("BHA", &["brighton", "brighton & hove albion", "brighton and hove albion", "bha"]),
+        (
+            "BHA",
+            &[
+                "brighton",
+                "brighton & hove albion",
+                "brighton and hove albion",
+                "bha",
+            ],
+        ),
         ("CHE", &["chelsea", "chelsea fc", "che"]),
         ("CRY", &["crystal palace", "palace", "cry"]),
         ("EVE", &["everton", "everton fc", "eve"]),
@@ -137,60 +326,159 @@ static TEAM_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|
         ("LEI", &["leicester", "leicester city", "lei"]),
         ("LIV", &["liverpool", "liverpool fc", "liv"]),
         ("MCI", &["manchester city", "man city", "mci"]),
-        ("MUN", &["manchester united", "man united", "man utd", "mun"]),
+        (
+            "MUN",
+            &["manchester united", "man united", "man utd", "mun"],
+        ),
         ("NEW", &["newcastle", "newcastle united", "new"]),
         ("NFO", &["nottingham forest", "nott forest", "nfo"]),
         ("SOU", &["southampton", "saints fc", "sou"]),
-        ("TOT", &["tottenham", "tottenham hotspur", "spurs fc", "tot"]),
+        (
+            "TOT",
+            &["tottenham", "tottenham hotspur", "spurs fc", "tot"],
+        ),
         ("WHU", &["west ham", "west ham united", "whu"]),
-        ("WOL", &["wolverhampton", "wolves fc", "wolverhampton wanderers", "wol"]),
-
+        (
+            "WOL",
+            &[
+                "wolverhampton",
+                "wolves fc",
+                "wolverhampton wanderers",
+                "wol",
+            ],
+        ),
         // ── NCAAB (Power Conference + Top Programs) ───────────────────
         ("DUKE", &["duke blue devils", "duke", "blue devils"]),
-        ("UNC",  &["north carolina tar heels", "north carolina", "tar heels", "unc"]),
-        ("UK",   &["kentucky wildcats", "kentucky", "uk wildcats"]),
-        ("KU",   &["kansas jayhawks", "kansas", "jayhawks", "ku"]),
-        ("BAMA", &["alabama crimson tide", "alabama", "crimson tide", "bama"]),
+        (
+            "UNC",
+            &[
+                "north carolina tar heels",
+                "north carolina",
+                "tar heels",
+                "unc",
+            ],
+        ),
+        ("UK", &["kentucky wildcats", "kentucky", "uk wildcats"]),
+        ("KU", &["kansas jayhawks", "kansas", "jayhawks", "ku"]),
+        (
+            "BAMA",
+            &["alabama crimson tide", "alabama", "crimson tide", "bama"],
+        ),
         ("ARIZ", &["arizona wildcats", "ariz wildcats"]),
-        ("ARK",  &["arkansas razorbacks", "arkansas", "razorbacks", "ark"]),
-        ("AUB",  &["auburn tigers", "auburn", "aub"]),
-        ("BAY",  &["baylor bears", "baylor", "bears", "bay"]),
+        (
+            "ARK",
+            &["arkansas razorbacks", "arkansas", "razorbacks", "ark"],
+        ),
+        ("AUB", &["auburn tigers", "auburn", "aub"]),
+        ("BAY", &["baylor bears", "baylor", "bears", "bay"]),
         ("CONN", &["uconn huskies", "uconn", "connecticut", "conn"]),
         ("CREIG", &["creighton bluejays", "creighton", "bluejays"]),
         ("FLA-NCAAB", &["florida gators", "gators"]),
         ("GONZ", &["gonzaga bulldogs", "gonzaga", "zags", "gonz"]),
         ("HOU-NCAAB", &["houston cougars", "cougars"]),
-        ("ILL",  &["illinois fighting illini", "illinois", "illini", "ill"]),
+        (
+            "ILL",
+            &["illinois fighting illini", "illinois", "illini", "ill"],
+        ),
         ("IOWA", &["iowa hawkeyes", "iowa", "hawkeyes"]),
-        ("ISU",  &["iowa state cyclones", "iowa state", "cyclones", "isu"]),
-        ("IU",   &["indiana hoosiers", "hoosiers", "iu"]),
-        ("LSU",  &["lsu tigers", "lsu"]),
+        (
+            "ISU",
+            &["iowa state cyclones", "iowa state", "cyclones", "isu"],
+        ),
+        ("IU", &["indiana hoosiers", "hoosiers", "iu"]),
+        ("LSU", &["lsu tigers", "lsu"]),
         ("MARQ", &["marquette golden eagles", "marquette"]),
-        ("MD",   &["maryland terrapins", "maryland", "terps", "md"]),
-        ("MICH", &["michigan wolverines", "michigan", "wolverines", "mich"]),
-        ("MSU",  &["michigan state spartans", "michigan state", "spartans", "msu"]),
-        ("NCST", &["nc state wolfpack", "nc state", "wolfpack", "ncst"]),
-        ("ND",   &["notre dame fighting irish", "notre dame", "fighting irish", "nd"]),
-        ("OSU",  &["ohio state buckeyes", "ohio state", "buckeyes", "osu"]),
-        ("ORE",  &["oregon ducks", "oregon", "ore"]),
-        ("PSU",  &["penn state nittany lions", "penn state", "nittany lions", "psu"]),
-        ("PUR",  &["purdue boilermakers", "purdue", "boilermakers", "pur"]),
-        ("RUTG", &["rutgers scarlet knights", "rutgers", "scarlet knights"]),
+        ("MD", &["maryland terrapins", "maryland", "terps", "md"]),
+        (
+            "MICH",
+            &["michigan wolverines", "michigan", "wolverines", "mich"],
+        ),
+        (
+            "MSU",
+            &[
+                "michigan state spartans",
+                "michigan state",
+                "spartans",
+                "msu",
+            ],
+        ),
+        (
+            "NCST",
+            &["nc state wolfpack", "nc state", "wolfpack", "ncst"],
+        ),
+        (
+            "ND",
+            &[
+                "notre dame fighting irish",
+                "notre dame",
+                "fighting irish",
+                "nd",
+            ],
+        ),
+        (
+            "OSU",
+            &["ohio state buckeyes", "ohio state", "buckeyes", "osu"],
+        ),
+        ("ORE", &["oregon ducks", "oregon", "ore"]),
+        (
+            "PSU",
+            &[
+                "penn state nittany lions",
+                "penn state",
+                "nittany lions",
+                "psu",
+            ],
+        ),
+        (
+            "PUR",
+            &["purdue boilermakers", "purdue", "boilermakers", "pur"],
+        ),
+        (
+            "RUTG",
+            &["rutgers scarlet knights", "rutgers", "scarlet knights"],
+        ),
         ("STAN", &["stanford cardinal", "stanford", "stan"]),
-        ("SYR",  &["syracuse orange", "syracuse", "syr"]),
+        ("SYR", &["syracuse orange", "syracuse", "syr"]),
         ("TENN", &["tennessee volunteers", "volunteers", "vols"]),
-        ("TXAM", &["texas a&m aggies", "texas a&m", "aggies", "tamu", "txam"]),
+        (
+            "TXAM",
+            &["texas a&m aggies", "texas a&m", "aggies", "tamu", "txam"],
+        ),
         ("TEX-NCAAB", &["texas longhorns", "longhorns"]),
-        ("TTU",  &["texas tech red raiders", "texas tech", "red raiders", "ttu"]),
+        (
+            "TTU",
+            &["texas tech red raiders", "texas tech", "red raiders", "ttu"],
+        ),
         ("UCLA", &["ucla bruins", "ucla"]),
-        ("UVA",  &["virginia cavaliers", "virginia", "uva"]),
+        ("UVA", &["virginia cavaliers", "virginia", "uva"]),
         ("VILL", &["villanova wildcats", "villanova", "vill"]),
-        ("VT",   &["virginia tech hokies", "virginia tech", "hokies", "vt"]),
-        ("WAKE", &["wake forest demon deacons", "wake forest", "demon deacons", "wake"]),
-        ("WISC", &["wisconsin badgers", "wisconsin", "badgers", "wisc"]),
-        ("WVU",  &["west virginia mountaineers", "west virginia", "mountaineers", "wvu"]),
+        (
+            "VT",
+            &["virginia tech hokies", "virginia tech", "hokies", "vt"],
+        ),
+        (
+            "WAKE",
+            &[
+                "wake forest demon deacons",
+                "wake forest",
+                "demon deacons",
+                "wake",
+            ],
+        ),
+        (
+            "WISC",
+            &["wisconsin badgers", "wisconsin", "badgers", "wisc"],
+        ),
+        (
+            "WVU",
+            &[
+                "west virginia mountaineers",
+                "west virginia",
+                "mountaineers",
+                "wvu",
+            ],
+        ),
         ("XAVI", &["xavier musketeers", "xavier", "xavi"]),
-
         // ── NCAAF (same schools, different sport context) ──────────────
         // Most NCAAF teams share NCAAB codes — the sport prefix in event_id disambiguates
 
@@ -215,7 +503,8 @@ pub fn normalize_team(raw: &str, _sport: &str) -> String {
         return "UNKNOWN".to_string();
     }
 
-    let cleaned = trimmed.to_lowercase()
+    let cleaned = trimmed
+        .to_lowercase()
         .replace(".", "")
         .replace("'", "")
         .replace("'", "");
@@ -228,7 +517,10 @@ pub fn normalize_team(raw: &str, _sport: &str) -> String {
 
     // Step 2: Check if input is already a valid 2-4 char code (e.g., "DET", "BOS")
     if trimmed.len() <= 4 && trimmed.chars().all(|c| c.is_ascii_uppercase()) {
-        if TEAM_MAP.values().any(|&code| strip_sport_suffix(code) == trimmed) {
+        if TEAM_MAP
+            .values()
+            .any(|&code| strip_sport_suffix(code) == trimmed)
+        {
             return trimmed.to_string();
         }
     }
@@ -324,7 +616,8 @@ pub fn canonical_event_id(sport: &str, away: &str, home: &str, start_time: &str)
         Some(d) => format!("{}:{}:{}-vs-{}", sport, d, team_a, team_b),
         None => {
             // Hash fallback to prevent different games from colliding
-            let hash: String = start_time.chars()
+            let hash: String = start_time
+                .chars()
                 .filter(|c| c.is_alphanumeric())
                 .take(12)
                 .collect();
@@ -361,7 +654,11 @@ pub fn normalize_selection(market_type: &str, raw: &str, sport: &str) -> String 
 fn extract_date(s: &str) -> Option<String> {
     // ISO 8601 with hour: "2026-03-15T19:30:00Z" → "2026-03-15T19"
     // Include hour to disambiguate doubleheader G1/G2 (same teams, same day, different times)
-    if s.len() >= 13 && s.as_bytes().get(4) == Some(&b'-') && s.as_bytes().get(7) == Some(&b'-') && s.as_bytes().get(10) == Some(&b'T') {
+    if s.len() >= 13
+        && s.as_bytes().get(4) == Some(&b'-')
+        && s.as_bytes().get(7) == Some(&b'-')
+        && s.as_bytes().get(10) == Some(&b'T')
+    {
         return Some(s[..13].to_string());
     }
     // Fallback: date only
@@ -370,7 +667,11 @@ fn extract_date(s: &str) -> Option<String> {
     }
     // Epoch milliseconds: "1711756200000" → date with hour
     if let Ok(epoch_ms) = s.parse::<i64>() {
-        let secs = if epoch_ms > 1_000_000_000_000 { epoch_ms / 1000 } else { epoch_ms };
+        let secs = if epoch_ms > 1_000_000_000_000 {
+            epoch_ms / 1000
+        } else {
+            epoch_ms
+        };
         if let Some(dt) = chrono::DateTime::from_timestamp(secs, 0) {
             return Some(dt.format("%Y-%m-%dT%H").to_string());
         }
@@ -381,7 +682,9 @@ fn extract_date(s: &str) -> Option<String> {
 /// Normalize a player name for cross-venue matching.
 /// "Luka Doncic" / "L. Doncic" / "Doncic, Luka" → "doncic"
 pub fn normalize_player(raw: &str) -> String {
-    let cleaned = raw.trim().to_lowercase()
+    let cleaned = raw
+        .trim()
+        .to_lowercase()
         .replace(".", "")
         .replace("'", "")
         .replace("'", "")
@@ -413,7 +716,11 @@ pub fn parse_player_prop(market_name: &str) -> Option<(String, String)> {
         "pa"
     } else if lower.contains("reb") && lower.contains("ast") {
         "ra"
-    } else if lower.contains("3 point") || lower.contains("three point") || lower.contains("3pt") || lower.contains("threes") {
+    } else if lower.contains("3 point")
+        || lower.contains("three point")
+        || lower.contains("3pt")
+        || lower.contains("threes")
+    {
         "threes"
     } else if lower.contains("points") || lower.contains("pts") {
         "points"
@@ -481,7 +788,12 @@ mod tests {
 
     #[test]
     fn test_canonical_event_id() {
-        let id = canonical_event_id("NBA", "Golden State Warriors", "Boston Celtics", "2026-03-15T19:30:00Z");
+        let id = canonical_event_id(
+            "NBA",
+            "Golden State Warriors",
+            "Boston Celtics",
+            "2026-03-15T19:30:00Z",
+        );
         assert_eq!(id, "NBA:2026-03-15T19:BOS-vs-GSW"); // alphabetical: BOS < GSW
     }
 
@@ -490,16 +802,29 @@ mod tests {
         // DK names
         let dk = canonical_event_id("NBA", "Warriors", "Celtics", "2026-03-15T19:30:00Z");
         // FD names
-        let fd = canonical_event_id("NBA", "Golden State Warriors", "Boston Celtics", "2026-03-15T19:30:00Z");
+        let fd = canonical_event_id(
+            "NBA",
+            "Golden State Warriors",
+            "Boston Celtics",
+            "2026-03-15T19:30:00Z",
+        );
         // PIN names (reversed order: away=Warriors, home=Celtics)
-        let pin = canonical_event_id("NBA", "Golden State Warriors", "Boston Celtics", "2026-03-15T19:30:00Z");
+        let pin = canonical_event_id(
+            "NBA",
+            "Golden State Warriors",
+            "Boston Celtics",
+            "2026-03-15T19:30:00Z",
+        );
         assert_eq!(dk, fd);
         assert_eq!(fd, pin);
     }
 
     #[test]
     fn test_selection_normalization() {
-        assert_eq!(normalize_selection("moneyline", "Boston Celtics", "NBA"), "BOS");
+        assert_eq!(
+            normalize_selection("moneyline", "Boston Celtics", "NBA"),
+            "BOS"
+        );
         assert_eq!(normalize_selection("total", "Over", "NBA"), "over");
         assert_eq!(normalize_selection("total", "Under 215.5", "NBA"), "under");
     }
@@ -510,7 +835,12 @@ mod tests {
         assert_eq!(normalize_team("Boston Bruins", "NHL"), "BOS");
         assert_eq!(normalize_team("Bruins", "NHL"), "BOS");
         // Cross-venue: PIN says "Boston Bruins", DK says "Bruins" → same code
-        let pin = canonical_event_id("NHL", "Boston Bruins", "New Jersey Devils", "2026-03-15T19:00:00Z");
+        let pin = canonical_event_id(
+            "NHL",
+            "Boston Bruins",
+            "New Jersey Devils",
+            "2026-03-15T19:00:00Z",
+        );
         let dk = canonical_event_id("NHL", "Bruins", "Devils", "2026-03-15T19:00:00Z");
         assert_eq!(pin, dk);
     }
@@ -519,8 +849,18 @@ mod tests {
     fn test_no_cross_sport_collision() {
         // NBA Boston Celtics and NHL Boston Bruins both strip to BOS,
         // but they're in different sport contexts so event_ids differ
-        let nba = canonical_event_id("NBA", "Boston Celtics", "New York Knicks", "2026-03-15T19:00:00Z");
-        let nhl = canonical_event_id("NHL", "Boston Bruins", "New York Rangers", "2026-03-15T19:00:00Z");
+        let nba = canonical_event_id(
+            "NBA",
+            "Boston Celtics",
+            "New York Knicks",
+            "2026-03-15T19:00:00Z",
+        );
+        let nhl = canonical_event_id(
+            "NHL",
+            "Boston Bruins",
+            "New York Rangers",
+            "2026-03-15T19:00:00Z",
+        );
         assert_ne!(nba, nhl); // Different sport prefix + different opponent codes
     }
 

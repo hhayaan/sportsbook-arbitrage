@@ -1,13 +1,13 @@
+use crate::db::Db;
+use crate::models::*;
+use crate::ws;
 use axum::{
-    extract::{State, ws::WebSocketUpgrade},
+    extract::{ws::WebSocketUpgrade, State},
     response::IntoResponse,
     Json,
 };
 use serde::Deserialize;
 use std::sync::Arc;
-use crate::db::Db;
-use crate::models::*;
-use crate::ws;
 
 pub struct AppState {
     pub db: Arc<Db>,
@@ -34,7 +34,9 @@ pub async fn deposit(
         state.db.update_balance(&body.venue, current + body.amount);
     }
     let balances = state.db.get_balances();
-    let _ = state.ws_tx.send(WsEvent::BalanceUpdated { balances: balances.clone() });
+    let _ = state.ws_tx.send(WsEvent::BalanceUpdated {
+        balances: balances.clone(),
+    });
     Json(balances)
 }
 
@@ -47,14 +49,18 @@ pub async fn withdraw(
         state.db.update_balance(&body.venue, new_bal);
     }
     let balances = state.db.get_balances();
-    let _ = state.ws_tx.send(WsEvent::BalanceUpdated { balances: balances.clone() });
+    let _ = state.ws_tx.send(WsEvent::BalanceUpdated {
+        balances: balances.clone(),
+    });
     Json(balances)
 }
 
 pub async fn reset_balances(State(state): State<Arc<AppState>>) -> Json<Vec<BookBalance>> {
     state.db.reset_balances();
     let balances = state.db.get_balances();
-    let _ = state.ws_tx.send(WsEvent::BalanceUpdated { balances: balances.clone() });
+    let _ = state.ws_tx.send(WsEvent::BalanceUpdated {
+        balances: balances.clone(),
+    });
     Json(balances)
 }
 
@@ -87,7 +93,9 @@ pub async fn update_settings(
     Json(settings): Json<Settings>,
 ) -> Json<Settings> {
     state.db.update_settings(&settings);
-    let _ = state.ws_tx.send(WsEvent::SettingsUpdated { settings: settings.clone() });
+    let _ = state.ws_tx.send(WsEvent::SettingsUpdated {
+        settings: settings.clone(),
+    });
     Json(settings)
 }
 

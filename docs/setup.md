@@ -208,11 +208,20 @@ Common Rust variables:
 | `MIN_ARB_PCT` | minimum arb percent |
 | `SKIP_LIVE` | `1` skips live markets |
 | `ODDS_FETCH_TIMEOUT_MS` | per-source fetch deadline |
+| `LIVE_ALLOWED_PAIRS` | optional live placement pair allowlist, for example `fanduel/pinnacle`; scanning remains unchanged |
 | `PIN_FILL_TIMEOUT_MS` | Pinnacle fill-report wait |
 | `FILL_TIMEOUT_MS` | non-Pinnacle fill-report wait |
 | `MAX_RESCUE_LOSS` | optional rescue-loss cap |
 | `ATTEMPT_TELEMETRY_DIR` | telemetry root |
 | `NAKED_LEGS_FILE` | naked-leg ledger path |
+| `FAMILY_DEDUP_FILE` | family dedup state path |
+| `FAMILY_DEDUP_TTL_MS` / `FAMILY_DEDUP_TTL_SECS` | hard-lock and repeat-window TTL, default 6 hours |
+| `FAMILY_DEDUP_SUCCESS_COOLDOWN_MS` / `FAMILY_DEDUP_SUCCESS_COOLDOWN_SECS` | successful-fill cooldown, default 30 seconds |
+| `FAMILY_DEDUP_SUCCESS_MAX_REPEATS` | successful repeats allowed after first fill, default 3 |
+| `DETECTOR_TELEMETRY` | `1` enables detector JSONL diagnostics |
+| `DETECTOR_DIAGNOSTICS` | alias for `DETECTOR_TELEMETRY` |
+| `DETECTOR_SNAPSHOT_LIMIT` | max candidate/near-miss snapshots per poll when detector telemetry is enabled |
+| `DETECTOR_NEAR_MISS_SIGMA_MAX` | highest sigma written as near-miss snapshot, default `1.02` |
 
 Common Node variables:
 
@@ -228,6 +237,7 @@ Common Node variables:
 
 - Keep stakes small while validating live behavior.
 - Check `engine\data\bets\<attempt_id>.jsonl` after any incident.
+- For FD/PIN or DK/PIN scan diagnosis, run one scan with `DETECTOR_TELEMETRY=1` and inspect `engine\data\events.jsonl`.
 - Cashout attempts may appear in telemetry without a matching terminal line.
 - If Pinnacle says accepted but Rust times out, inspect the fill report path immediately; accepted Pinnacle IDs must reach Rust as parseable `bet_id`/`purchase_id`.
-- Unknown Pinnacle periods must be fixed before higher-stake live use.
+- If a high-percent arb appears, inspect `pin_venue_market_id`; full-game Pinnacle moneyline must be `s;0;m`, not `s;<nonzero>;m`.

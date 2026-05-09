@@ -32,7 +32,15 @@ pub fn log_sizing(candidate: &ArbCandidate, leg1_stake: f64, leg2_stake: f64, pr
     );
 }
 
-pub fn log_leg_filled(attempt_id: &str, leg: u8, venue: &str, selection: &str, stake: f64, odds: f64, status: &str) {
+pub fn log_leg_filled(
+    attempt_id: &str,
+    leg: u8,
+    venue: &str,
+    selection: &str,
+    stake: f64,
+    odds: f64,
+    status: &str,
+) {
     tracing::info!(
         target: "trades",
         event = "LEG_FILL",
@@ -59,7 +67,13 @@ pub fn log_execution_closed(attempt: &ArbAttempt, profit: f64, total_traded: u64
     );
 }
 
-pub fn log_rescue_needed(attempt_id: &str, event_id: &str, leg2_status: &str, leg1_stake: f64, leg1_odds: f64) {
+pub fn log_rescue_needed(
+    attempt_id: &str,
+    event_id: &str,
+    leg2_status: &str,
+    leg1_stake: f64,
+    leg1_odds: f64,
+) {
     tracing::warn!(
         target: "trades",
         event = "RESCUE_NEEDED",
@@ -72,7 +86,14 @@ pub fn log_rescue_needed(attempt_id: &str, event_id: &str, leg2_status: &str, le
     );
 }
 
-pub fn log_rescue_computed(attempt_id: &str, venue: &str, selection: &str, stake: f64, odds: f64, worst_loss: f64) {
+pub fn log_rescue_computed(
+    attempt_id: &str,
+    venue: &str,
+    selection: &str,
+    stake: f64,
+    odds: f64,
+    worst_loss: f64,
+) {
     tracing::info!(
         target: "trades",
         event = "RESCUE_COMPUTED",

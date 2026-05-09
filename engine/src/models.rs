@@ -87,6 +87,7 @@ pub struct PriceEntry {
     pub is_live: bool,
     pub start_time_utc: String,
     pub venue_market_id: String,
+    pub venue_event_id: String,
 }
 
 impl PriceEntry {
@@ -103,6 +104,7 @@ impl PriceEntry {
             is_live: m.is_live,
             start_time_utc: m.start_time_utc.clone(),
             venue_market_id: m.venue_market_id.clone(),
+            venue_event_id: m.venue_event_id.clone(),
         }
     }
 }
@@ -149,9 +151,7 @@ impl Book {
 
     pub fn expire(&mut self, now_ms: u64) {
         for inner in self.entries.values_mut() {
-            inner.retain(|_, entry| {
-                now_ms.saturating_sub(entry.received_at_ms) <= self.max_age_ms
-            });
+            inner.retain(|_, entry| now_ms.saturating_sub(entry.received_at_ms) <= self.max_age_ms);
         }
         self.entries.retain(|_, inner| !inner.is_empty());
     }
@@ -295,7 +295,7 @@ pub struct Settings {
     pub enabled: bool,
     pub min_arb_pct: f64,
     pub max_stake: f64,
-    pub stake_mode: String,       // "fixed" | "proportional"
+    pub stake_mode: String, // "fixed" | "proportional"
     pub fixed_stake: f64,
     pub proportional_pct: f64,
 }

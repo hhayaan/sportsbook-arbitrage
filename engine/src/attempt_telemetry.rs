@@ -36,4 +36,3 @@ pub fn emit_event(event_type: &str, attempt_id: Option<&str>, payload: Value) ->
 
     Ok(())
 }
-

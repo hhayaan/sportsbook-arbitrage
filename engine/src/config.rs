@@ -51,7 +51,6 @@ pub fn sports() -> Vec<SportConfig> {
             fd_event_type: None,
             pin_league_ids: vec![880],
         },
-
         // ── Soccer ──────────────────────────────────────────────────
         // FD uses eventTypeId=1 for ALL soccer — only fetch once via SOCCER config.
         // DK and PIN have per-league endpoints, so each league has its own entry.
@@ -111,7 +110,6 @@ pub fn sports() -> Vec<SportConfig> {
             fd_event_type: None, // Already fetched via SOCCER
             pin_league_ids: vec![2663],
         },
-
         // ── Combat Sports ───────────────────────────────────────────
         SportConfig {
             name: "UFC",

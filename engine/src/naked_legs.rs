@@ -110,4 +110,3 @@ pub fn new_naked_leg(
         notes,
     }
 }
-

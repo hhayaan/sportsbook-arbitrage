@@ -1,8 +1,8 @@
+use crate::models::WsEvent;
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use crate::models::WsEvent;
 
 pub type WsTx = broadcast::Sender<WsEvent>;
 

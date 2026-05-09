@@ -71,6 +71,7 @@ Active runtime configuration comes from:
 | `engine/src/live_executor.rs` | Live protocol, pre-fire checks, placement, recovery, cashout, naked-leg monitor |
 | `engine/src/status_classifier.rs` | Raw DK/cashout status classification |
 | `engine/src/attempt_telemetry.rs` | JSONL telemetry writer |
+| `engine/src/detector_telemetry.rs` | Optional detector funnel and candidate diagnostics |
 | `engine/src/family_dedup.rs` | Persistent family-scope live-fire dedup |
 | `engine/src/naked_legs.rs` | Durable unresolved-exposure ledger |
 | `engine/src/pin_yank.rs` | Temporary Pinnacle hard-yank blacklist |
@@ -92,7 +93,8 @@ DraftKings:
 FanDuel:
 
 - Rust calls Ontario content-managed-page endpoints.
-- Soccer uses the FanDuel event-type path.
+- Soccer uses the FanDuel event-type path once, then maps supported competition names into the configured league namespaces: `MLS`, `EPL`, `LA_LIGA`, `SERIE_A`, `BUNDESLIGA`, `LIGUE_1`, and `UCL`.
+- Unsupported FanDuel soccer competitions are skipped instead of being compared under generic `SOCCER`.
 - FanDuel scan data is public. Authenticated FD checks happen later through `validate_soft`.
 
 Pinnacle:
@@ -165,9 +167,18 @@ roi = 1 / sigma - 1
 
 Only `sigma < 1.0` is executable.
 
+Optional detector diagnostics are available without changing terminal output. Set `DETECTOR_TELEMETRY=1` or `DETECTOR_DIAGNOSTICS=1` to write JSONL events for:
+
+- source market counts by venue, sport, market type, and period;
+- venue-pair funnel summaries, including shared identity keys, rejected stale pairs, spread rejects, no-Pinnacle rejects, sigma failures, near misses, and candidates;
+- compact Pinnacle-involved candidate/near-miss snapshots with venue market IDs and venue event IDs;
+- candidate, min-edge, and family-dedup gate summaries.
+
 ## Live Execution Model
 
 Live mode uses the WebSocket at `WS_URL`, default `ws://127.0.0.1:3402`.
+
+`LIVE_ALLOWED_PAIRS` can restrict live placement pairs without changing scanning. For example, `LIVE_ALLOWED_PAIRS=fanduel/pinnacle` still scans and prints DK/PIN opportunities, but only FD/PIN candidates can reach live execution.
 
 For Pinnacle-backed arbs, the normal path is:
 
@@ -218,9 +229,9 @@ The family key is:
 sport + event_id + soft_venue + market_type + period
 ```
 
-The key is order-independent for Pinnacle/soft-book pairs and intentionally excludes line and side. This blocks repeated attacks on nearby same-event lines after either a successful fill or a non-retryable soft leg-1 rejection such as DK `MaxExposureReached`.
+The key is order-independent for Pinnacle/soft-book pairs and intentionally excludes line and side. Successful two-leg fills record the family, start a short success cooldown, and allow limited re-entry after the cooldown. Clear soft leg-1 limit/exposure or unavailable-market failures hard-lock the family for the TTL.
 
-Default TTL is 6 hours. `FAMILY_DEDUP_FILE`, `FAMILY_DEDUP_TTL_MS`, and `FAMILY_DEDUP_TTL_SECS` can override the defaults. `DEDUP_COOLDOWN_MS` and `DEDUP_COOLDOWN_SECS` are accepted as compatibility aliases.
+Default TTL is 6 hours. Successful fills default to a 30-second cooldown and 3 allowed repeats after the first fill. `FAMILY_DEDUP_FILE`, `FAMILY_DEDUP_TTL_MS`, `FAMILY_DEDUP_TTL_SECS`, `FAMILY_DEDUP_SUCCESS_COOLDOWN_MS`, `FAMILY_DEDUP_SUCCESS_COOLDOWN_SECS`, and `FAMILY_DEDUP_SUCCESS_MAX_REPEATS` can override the defaults. `DEDUP_COOLDOWN_MS` and `DEDUP_COOLDOWN_SECS` are accepted as compatibility aliases for the TTL.
 
 True Hunter-style ladder buckets, ladder allowlists, and family edge-improvement gates are not merged.
 
@@ -246,14 +257,17 @@ Runtime files:
 - `data/naked-legs.json`.
 - `data/family-dedup.json`.
 
+Detector diagnostics, when enabled, are written into the same JSONL telemetry stream.
+
 `ATTEMPT_TELEMETRY_DIR`, `NAKED_LEGS_FILE`, and `FAMILY_DEDUP_FILE` can override the telemetry, naked-leg, and family-dedup locations.
 
 ## Current Risk Items
 
 These are current engineering items:
 
-- Unknown Pinnacle period numbers currently fall back to `full_game`; unsupported periods should be skipped or mapped explicitly before higher-stake live use.
+- Unknown Pinnacle period numbers are skipped instead of mapped to `full_game`; non-full-game Pinnacle moneylines are also skipped during parsing.
 - True ladder buckets and edge-improvement gates are not merged; current family dedup is intentionally broad.
+- FD authenticated scan overlay is not merged; use detector telemetry and live validation logs before deciding whether public FD scan prices are a recurring problem.
 - Settlement ingest is not implemented.
 - Cashout retry scheduling is minimal.
 - Live WebSocket reconnect after startup is not implemented.
