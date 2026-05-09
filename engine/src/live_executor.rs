@@ -1281,7 +1281,7 @@ pub async fn try_execute(
     db: &Arc<Db>,
     candidate: &ArbCandidate,
     settings: &Settings,
-) -> Option<PaperTrade> {
+) -> Option<ExecutionResult> {
     if !BETTABLE_VENUES.contains(&candidate.leg1_venue.as_str())
         || !BETTABLE_VENUES.contains(&candidate.leg2_venue.as_str())
     {
@@ -1680,11 +1680,17 @@ pub async fn try_execute(
             let err = f.error_message.unwrap_or_default();
             tracing::error!("LEG 1 FAILED: {} - {}.", f.status, err);
             emit_attempt("LEG1_FAILED", &attempt_id, json!({ "status": f.status, "error": err }));
+            if let Some(reason) = family_lock_reason_for_leg1_failure(first_venue, &f.status, &err) {
+                return Some(ExecutionResult::family_lock(reason));
+            }
             return None;
         }
         Err(e) => {
             tracing::error!("LEG 1 ERROR: {}.", e);
             emit_attempt("LEG1_ERROR", &attempt_id, json!({ "error": e }));
+            if let Some(reason) = family_lock_reason_for_leg1_failure(first_venue, "error", &e) {
+                return Some(ExecutionResult::family_lock(reason));
+            }
             return None;
         }
     };
@@ -2032,12 +2038,69 @@ pub async fn try_execute(
         s2
     );
 
-    Some(trade)
+    Some(ExecutionResult::trade(trade))
+}
+
+fn family_lock_reason_for_leg1_failure(
+    venue: &str,
+    status: &str,
+    error_message: &str,
+) -> Option<String> {
+    if venue == "pinnacle" {
+        return None;
+    }
+
+    let text = format!("{} {}", status, error_message).to_ascii_lowercase();
+    if is_retryable_leg1_failure(&text) {
+        return None;
+    }
+
+    let class = if text.contains("maxexposurereached")
+        || text.contains("max exposure")
+        || text.contains("customerlimitserror")
+    {
+        "max_exposure_reached"
+    } else if text.contains("declined") {
+        "declined"
+    } else if text.contains("purchasenotaccepted") || text.contains("purchase not accepted") {
+        "purchase_not_accepted"
+    } else {
+        "nonretryable_leg1_failure"
+    };
+
+    Some(format!("{}_{}", venue, class))
+}
+
+fn is_retryable_leg1_failure(message: &str) -> bool {
+    let text = message.to_ascii_lowercase();
+    [
+        "slippage",
+        "insufficient_funds",
+        "insufficient funds",
+        "wager-006",
+        "wager-001",
+        "playsportsbook",
+        "no bet returned from calculatebets",
+        "selectionidsnotfound",
+        "dar404",
+        "not logged in",
+        "unauthorized",
+        "auth_invalid",
+        "dsh-006",
+        "dsc-0015",
+        "market not found",
+        "target page, context or browser has been closed",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_pin_rescue_market_ids, BetStatusResult, FillReport};
+    use super::{
+        build_pin_rescue_market_ids, family_lock_reason_for_leg1_failure, BetStatusResult,
+        FillReport,
+    };
 
     #[test]
     fn rescue_market_ids_expand_totals() {
@@ -2079,6 +2142,23 @@ mod tests {
             fill.attempt_id,
             "6683e2e7-e0d7-47c1-ac81-28c4398be5e8-L2"
         );
+    }
+
+    #[test]
+    fn max_exposure_leg1_failure_locks_family() {
+        let reason = family_lock_reason_for_leg1_failure(
+            "draftkings",
+            "rejected",
+            r#"placeBets failed (422): {"declineReasons":[{"name":"CustomerLimitsError","reason":"MaxExposureReached"}]}"#,
+        );
+        assert_eq!(reason.as_deref(), Some("draftkings_max_exposure_reached"));
+    }
+
+    #[test]
+    fn retryable_leg1_failure_does_not_lock_family() {
+        let reason =
+            family_lock_reason_for_leg1_failure("draftkings", "error", "AUTH_INVALID unauthorized");
+        assert!(reason.is_none());
     }
 
     #[test]

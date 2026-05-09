@@ -236,6 +236,28 @@ pub struct PaperTrade {
     pub status: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ExecutionResult {
+    pub trade: Option<PaperTrade>,
+    pub family_lock_reason: Option<String>,
+}
+
+impl ExecutionResult {
+    pub fn trade(trade: PaperTrade) -> Self {
+        Self {
+            trade: Some(trade),
+            family_lock_reason: None,
+        }
+    }
+
+    pub fn family_lock(reason: impl Into<String>) -> Self {
+        Self {
+            trade: None,
+            family_lock_reason: Some(reason.into()),
+        }
+    }
+}
+
 // ── Arb opportunity (logged) ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

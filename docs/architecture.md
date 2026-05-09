@@ -71,6 +71,7 @@ Active runtime configuration comes from:
 | `engine/src/live_executor.rs` | Live protocol, pre-fire checks, placement, recovery, cashout, naked-leg monitor |
 | `engine/src/status_classifier.rs` | Raw DK/cashout status classification |
 | `engine/src/attempt_telemetry.rs` | JSONL telemetry writer |
+| `engine/src/family_dedup.rs` | Persistent family-scope live-fire dedup |
 | `engine/src/naked_legs.rs` | Durable unresolved-exposure ledger |
 | `engine/src/pin_yank.rs` | Temporary Pinnacle hard-yank blacklist |
 | `engine/src/paper_executor.rs` | Local simulated execution |
@@ -201,6 +202,28 @@ Recovery can:
 
 Cashout attempts and results are visible in JSONL telemetry. Terminal output does not currently print every cashout command/result.
 
+## Family Dedup
+
+The main loop uses persistent family-scope dedup before actual live WebSocket execution. Paper/scan runs do not write persistent family locks.
+
+The default lock file is:
+
+```text
+data/family-dedup.json
+```
+
+The family key is:
+
+```text
+sport + event_id + soft_venue + market_type + period
+```
+
+The key is order-independent for Pinnacle/soft-book pairs and intentionally excludes line and side. This blocks repeated attacks on nearby same-event lines after either a successful fill or a non-retryable soft leg-1 rejection such as DK `MaxExposureReached`.
+
+Default TTL is 6 hours. `FAMILY_DEDUP_FILE`, `FAMILY_DEDUP_TTL_MS`, and `FAMILY_DEDUP_TTL_SECS` can override the defaults. `DEDUP_COOLDOWN_MS` and `DEDUP_COOLDOWN_SECS` are accepted as compatibility aliases.
+
+True Hunter-style ladder buckets, ladder allowlists, and family edge-improvement gates are not merged.
+
 ## Persistence
 
 SQLite lives at `data/trades.db` relative to the engine working directory. When run from `engine/`, this is:
@@ -221,15 +244,16 @@ Runtime files:
 - `data/events.jsonl`;
 - `data/bets/<attempt_id>.jsonl`;
 - `data/naked-legs.json`.
+- `data/family-dedup.json`.
 
-`ATTEMPT_TELEMETRY_DIR` and `NAKED_LEGS_FILE` can override the telemetry and naked-leg locations.
+`ATTEMPT_TELEMETRY_DIR`, `NAKED_LEGS_FILE`, and `FAMILY_DEDUP_FILE` can override the telemetry, naked-leg, and family-dedup locations.
 
 ## Current Risk Items
 
 These are current engineering items:
 
 - Unknown Pinnacle period numbers currently fall back to `full_game`; unsupported periods should be skipped or mapped explicitly before higher-stake live use.
-- Family/ladder dedup is not merged; current dedup is a basic 60-second event/market/venue-pair cooldown.
+- True ladder buckets and edge-improvement gates are not merged; current family dedup is intentionally broad.
 - Settlement ingest is not implemented.
 - Cashout retry scheduling is minimal.
 - Live WebSocket reconnect after startup is not implemented.

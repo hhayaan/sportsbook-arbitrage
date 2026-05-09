@@ -42,7 +42,7 @@ poll
   detect arbs
   persist detected opportunities
   broadcast dashboard events
-  apply pre-execution gates
+  apply pre-execution gates and family dedup
   run paper or live executor
   periodically refresh live balances
   periodically monitor persisted naked legs
@@ -121,17 +121,17 @@ Before an executor is called, the main loop:
 7. Emits a warning for very high arb percentages.
 8. Skips live markets when `SKIP_LIVE=1`.
 9. Skips pregame events farther than `MAX_HOURS_TO_START`, default 24 hours.
-10. Applies the 60-second event/market/venue-pair cooldown.
+10. Applies persistent family-scope dedup for actual live WebSocket execution.
 11. Requires `settings.enabled`.
 12. Calls paper or live execution.
 
-The cooldown key is:
+The family dedup key is:
 
 ```text
-event_id + market_type + leg1_venue + leg2_venue
+sport + event_id + soft_venue + market_type + period
 ```
 
-Family/ladder dedup is not implemented yet.
+The key is order-independent for Pinnacle/soft-book pairs and intentionally excludes line and side. A successful live fill locks the family. A non-retryable soft leg-1 rejection, such as DK `MaxExposureReached`, also locks the family. Locks are stored in `data/family-dedup.json` by default and use a 6-hour TTL unless overridden. Paper/scan runs do not write persistent family locks.
 
 ## Stake Sizing
 
@@ -262,8 +262,7 @@ The monitor:
 
 ## Current Work To Do
 
-- Implement family/ladder dedup as the next merge phase.
+- Decide whether true ladder buckets or an edge-improvement gate are needed after low-stake family-dedup testing.
 - Fix unsupported Pinnacle period handling so unknown periods do not become full-game markets.
 - Add or improve terminal visibility for recovery cashout actions.
 - Add incident replay fixtures for real live failures.
-- Decide whether unused unknown-fill fields should be removed from the fill model.

@@ -29,8 +29,8 @@ This file is the current merge status for bringing selected Hunter engine behavi
 | FD cashout | FD open-bet lookup, fresh `cashOutToken`, browser-context cashout write, and geo JWT freshness are implemented. | Hunter has a larger FD cashout stack. | Scoped core merged; extra FD stack is out unless evidence requires it. |
 | Recovery | Original/adjacent Pinnacle rescue, cashout comparison, naked-leg persistence, monitor reload, and original-line relist recovery are wired. | Hunter has broader retry scheduling and settlement support. | First-wave core merged; retry schedule and settlement are not merged. |
 | Attempt telemetry | JSONL global and per-attempt events are written under `engine/data` by default. | Hunter has structured lifecycle telemetry. | Rust-native telemetry merged. |
-| Dedup/family/ladder | Current runtime has a basic 60-second event/market/venue-pair cooldown. | Hunter has family-scope dedup and ladder allowlists. | Only planned second-phase item. |
-| Pinnacle period handling | Source currently maps unknown Pinnacle periods to `full_game`. | Hunter preserves period suffixes in family/ladder keys. | Needs fix before higher-stake live use. |
+| Dedup/family/ladder | Runtime now has persistent family-scope dedup keyed by sport, event, soft book, market type, and period. | Hunter also has true ladder buckets, allowlists, and edge-improvement gates. | Phase-two core merged; ladder buckets and edge gates are left out for now. |
+| Pinnacle period handling | Family dedup preserves the current period label in its key, but source parsing still maps unknown Pinnacle periods to `full_game`. | Hunter preserves period suffixes in family/ladder keys. | Family-key preservation merged; parser fallback still needs a fix before broader period use. |
 | Settlement ingest | SQLite records live trades, balances, arbs, and telemetry; no settlement reconciliation pipeline. | Hunter has more settlement/open-bet handling. | Not merged. |
 | Replay fixtures | Focused Rust unit tests exist; no incident replay harness. | Hunter migration docs call for replay fixtures. | Recommended later, not phase two. |
 | Unknown fill/manual reconciliation | Fill status is not allowed to become an operator-manual "unknown placed" state. | Hunter had an indeterminate-write path that could send `fill_report status="unknown"` with `retry_allowed=false`. | Not being merged. Automated filled/rejected/error truth is required. |
@@ -95,7 +95,7 @@ Left out:
 Recommendation:
 
 - Keep exact-market blacklist now.
-- Revisit family-level yank behavior with the dedup/family phase.
+- Revisit family-level yank behavior only if exact-market blacklisting leaves repeated same-family Pinnacle failures in live evidence.
 
 ### Actual-Fill Hedge Math
 
@@ -223,36 +223,73 @@ Recommendation:
 - Keep Rust-native JSONL.
 - Use per-attempt files as the first incident-review source.
 
-## Shelved For Next Merge Phase
+## Merged Phase Two
 
-### Advanced Family / Ladder Dedup
+### Family-Scoped Dedup And Soft-Limit Lock
 
-This is the only planned phase-two merge item.
+This is the first phase-two merge item. It replaces the old short in-memory event/market/venue-pair cooldown with a persistent family-level lock.
 
-Required scope:
+What our engine previously did:
 
-- Add a Rust family key for live fire dedup.
-- Preserve period in the family key.
-- Default to family-scope blocking.
-- Add explicit ladder allowlist behavior only where configured.
-- Log terminal-visible blocked/allowed decisions.
-- Reuse the family identity for future family-level Pinnacle yank behavior.
+- The main loop kept an in-memory 60-second cooldown.
+- The key was effectively `event_id + market_type + leg1_venue + leg2_venue`.
+- It only locked after a successful trade.
+- It was order-sensitive, short-lived, not persisted, and did not stop repeated same-event attacks after a soft-book exposure limit rejection.
 
-Why it is next:
+Current behavior:
 
-- It directly controls repeated exposure from the same event/market family.
-- It does not require props, UI, new books, or a broader market scope.
-- It is the cleanest next safety upgrade after first-wave live testing.
+- Rust writes family locks to `data/family-dedup.json` by default.
+- The default family lock TTL is 6 hours.
+- The family key is `sport + event_id + soft_venue + market_type + period`.
+- The key is order-independent for Pinnacle/soft-book pairs, so DK/PIN and PIN/DK are treated as the same family.
+- Period is preserved in the key.
+- Line and side are intentionally not in the key, so repeated attempts on nearby lines in the same event/market/soft-book family are blocked.
+- Before live execution, Rust checks the family lock locally before spending time on quote, validation, or placement.
+- A successful live two-leg fill locks the family with reason `both_filled`.
+- A non-retryable soft leg-1 rejection locks the family, including DK `MaxExposureReached` / `CustomerLimitsError`.
+- Retryable failures such as auth errors, missing markets, slippage, insufficient funds, and browser/page failures do not lock the family.
+- Terminal output prints `[FAMILY DEDUP] Skip ...` and `[FAMILY DEDUP] Locked ...`.
+- JSONL telemetry emits `FAMILY_DEDUP_SKIP` and `FAMILY_DEDUP_LOCKED`.
+
+Configuration:
+
+- `FAMILY_DEDUP_FILE` overrides the lock file path.
+- `FAMILY_DEDUP_TTL_MS` overrides the lock TTL in milliseconds.
+- `FAMILY_DEDUP_TTL_SECS` overrides the lock TTL in seconds.
+- `DEDUP_COOLDOWN_MS` and `DEDUP_COOLDOWN_SECS` remain accepted as compatibility aliases.
+
+How it changes the process:
+
+- After a trade fills on an event/market/soft-book family, the engine stops firing more bets into that family for the TTL.
+- After DK/FD says the customer is limit-blocked on the first leg, the engine stops hammering that same family.
+- This should prevent the live behavior where one event generated too many repeated DK/PIN attempts until DK returned `MaxExposureReached`.
+- Paper/scan runs do not write persistent family locks.
+- Latency cost is local file-backed state lookup only. No new sportsbook request is added to the hot path.
+
+What was left out:
+
+- Hunter's true ladder bucket system.
+- Hunter's ladder allowlist for configured alternate-line families.
+- Hunter's family edge-improvement gate that can allow a later same-family attempt only when the edge meaningfully improves.
+- Hunter's unknown-write family freeze. This project intentionally does not use manual/unknown fill status as a live placement outcome.
+- Player props, broad alternate markets, expanded period surfaces, and frontend/UI dedup controls.
+- Family-level Pinnacle yank umbrella cooldowns. Current Pinnacle hard-yank handling remains exact-market scoped.
+
+Recommendation:
+
+- Keep the broad family lock while low-stake testing continues.
+- Add true ladder buckets only if we deliberately start trading multiple lines in the same event/market family.
+- Add an edge-improvement gate only if the 6-hour family lock proves too conservative and we want controlled same-family re-entry.
+- Keep unknown-write/manual reconciliation behavior out.
 
 ## Required Fixes Before Higher-Stake Live Use
 
-These are not the phase-two Hunter dedup item, but they are current project work that should be addressed before raising stake size.
+These are current project work items that should be addressed before raising stake size.
 
 | Work item | Reason |
 | --- | --- |
 | Stop mapping unknown Pinnacle periods to `full_game` | Current parser falls back unknown period numbers to full game. That can make live period markets look like full-game markets. |
 | Improve recovery terminal visibility | Cashout attempts/results are currently visible in JSONL telemetry, but not always obvious in terminal output. |
-| Decide whether to remove unused unknown-fill fields | The unknown/manual reconciliation behavior is not being merged. Any unused remnants should be removed if they are not needed for real adapter payloads. |
 | Add incident replay fixtures | Live issues should become deterministic tests before recovery logic grows. |
 
 ## Not Merged And Not Planned
@@ -264,6 +301,10 @@ These are not the phase-two Hunter dedup item, but they are current project work
 | Full Hunter monolith | Leave out. |
 | Hunter indeterminate Pinnacle write response | Leave out. Do not send `fill_report status="unknown"` / `retry_allowed=false` as a live placement outcome. The engine must receive automated filled/rejected/error truth. |
 | Manual unknown-fill reconciliation status | Leave out. The engine must not require operator reconciliation as part of normal automation. |
+| Hunter true ladder buckets | Leave out for now. Revisit only if the engine intentionally trades multiple lines in the same event/market family. |
+| Hunter ladder allowlists | Leave out for now with true ladder buckets. |
+| Hunter family edge-improvement gate | Not planned yet. Revisit only if broad family locks become too conservative in live testing. |
+| Hunter unknown-write family freeze | Leave out because unknown write status is not a valid live placement outcome in this engine. |
 | Second Pinnacle browser | Leave out. |
 | Guest/auth Pinnacle double-scan | Leave out unless explicitly reintroduced for diagnostics. |
 | FD TLS impersonation | Leave out unless browser-context writes fail with evidence. |

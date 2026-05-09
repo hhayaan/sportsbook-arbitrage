@@ -5,6 +5,7 @@ mod circuit_breaker;
 mod config;
 mod db;
 mod execution_math;
+mod family_dedup;
 mod live_executor;
 mod models;
 mod naked_legs;
@@ -28,6 +29,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
@@ -107,10 +109,11 @@ async fn main() {
     let dk_proxy_base_url = odds_fetcher::draftkings_proxy_base_url();
 
     tracing::info!(
-        "Settings: enabled={} stake_mode={} fixed_stake=${:.2} max_stake=${:.2} min_arb_pct={:.1}% max_hours={} skip_live={} pin_odds_source={}",
+        "Settings: enabled={} stake_mode={} fixed_stake=${:.2} max_stake=${:.2} min_arb_pct={:.1}% max_hours={} skip_live={} pin_odds_source={} family_dedup_ttl={}s",
         settings_overrides.enabled, settings_overrides.stake_mode,
         settings_overrides.fixed_stake, settings_overrides.max_stake, settings_overrides.min_arb_pct,
-        max_hours_to_start, skip_live, pin_odds_source
+        max_hours_to_start, skip_live, pin_odds_source,
+        family_dedup::FamilyDedup::ttl_secs_from_env()
     );
     tracing::info!("DraftKings proxy endpoint: {}", dk_proxy_base_url);
     if pin_odds_source == "auth" {
@@ -177,10 +180,13 @@ async fn main() {
             None
         };
         let mut book = models::Book::new(config::MAX_DATA_AGE_MS);
-        // Time-based dedup: maps trade_key → last trade timestamp
-        let mut traded_keys: std::collections::HashMap<String, std::time::Instant> =
-            std::collections::HashMap::new();
-        let dedup_cooldown = std::time::Duration::from_secs(60);
+        let mut family_dedup = family_dedup::FamilyDedup::load_from_env();
+        tracing::info!(
+            "Family dedup configured: ttl={}s file={}",
+            family_dedup.ttl_secs(),
+            std::env::var("FAMILY_DEDUP_FILE")
+                .unwrap_or_else(|_| "data/family-dedup.json".to_string())
+        );
 
         // Safety modules
         // Paper trading: generous limits (real trading would use 3-5 bets/hour)
@@ -413,37 +419,84 @@ async fn main() {
                     }
 
                     let candidate_to_trade = candidate.clone();
+                    let live_execution_available = ws_conn.is_some();
 
-                    let trade_key = format!(
-                        "{}:{}:{}:{}",
-                        candidate_to_trade.event_id,
-                        candidate_to_trade.market_type,
-                        candidate_to_trade.leg1_venue,
-                        candidate_to_trade.leg2_venue
-                    );
+                    if live_execution_available {
+                        if let Some(hit) = family_dedup.lock_status(&candidate_to_trade) {
+                            tracing::info!(
+                                "[FAMILY DEDUP] Skip {} {} {} via {} ({}s left, reason={}, key={})",
+                                candidate_to_trade.sport,
+                                candidate_to_trade.market_type,
+                                candidate_to_trade.period,
+                                if candidate_to_trade.leg1_venue == "pinnacle" {
+                                    &candidate_to_trade.leg2_venue
+                                } else {
+                                    &candidate_to_trade.leg1_venue
+                                },
+                                hit.remaining_secs,
+                                hit.reason,
+                                hit.key
+                            );
+                            let _ = attempt_telemetry::emit_event(
+                                "FAMILY_DEDUP_SKIP",
+                                None,
+                                json!({
+                                    "key": hit.key,
+                                    "reason": hit.reason,
+                                    "remaining_secs": hit.remaining_secs,
+                                    "event_id": candidate_to_trade.event_id,
+                                    "sport": candidate_to_trade.sport,
+                                    "market_type": candidate_to_trade.market_type,
+                                    "period": candidate_to_trade.period,
+                                }),
+                            );
+                            continue;
+                        }
+                    }
 
-                    // Time-based dedup: skip if traded within cooldown period
-                    let should_trade = match traded_keys.get(&trade_key) {
-                        Some(last) => last.elapsed() >= dedup_cooldown,
-                        None => true,
+                    // Branch: live execution via WebSocket or paper execution
+                    let execution_result = if let Some((ref writer, ref reader)) = ws_conn {
+                        live_executor::try_execute(
+                            writer,
+                            reader,
+                            &poll_db,
+                            &candidate_to_trade,
+                            &settings,
+                        )
+                        .await
+                    } else {
+                        paper_executor::try_execute(&poll_db, &candidate_to_trade, &settings)
                     };
 
-                    if should_trade {
-                        // Branch: live execution via WebSocket or paper execution
-                        let trade_result = if let Some((ref writer, ref reader)) = ws_conn {
-                            live_executor::try_execute(
-                                writer,
-                                reader,
-                                &poll_db,
-                                &candidate_to_trade,
-                                &settings,
-                            )
-                            .await
-                        } else {
-                            paper_executor::try_execute(&poll_db, &candidate_to_trade, &settings)
-                        };
+                    if let Some(result) = execution_result {
+                        if let Some(reason) = result.family_lock_reason.as_deref() {
+                            if live_execution_available {
+                                let entry = family_dedup.record_lock(&candidate_to_trade, reason);
+                                tracing::info!(
+                                    "[FAMILY DEDUP] Locked {} for {}s after {} (key={})",
+                                    entry.event_id,
+                                    family_dedup.ttl_secs(),
+                                    entry.reason,
+                                    entry.key
+                                );
+                                let _ = attempt_telemetry::emit_event(
+                                    "FAMILY_DEDUP_LOCKED",
+                                    None,
+                                    json!({
+                                        "key": entry.key,
+                                        "reason": entry.reason,
+                                        "event_id": entry.event_id,
+                                        "sport": entry.sport,
+                                        "soft_venue": entry.soft_venue,
+                                        "market_type": entry.market_type,
+                                        "period": entry.period,
+                                        "expires_at_ms": entry.expires_at_ms,
+                                    }),
+                                );
+                            }
+                        }
 
-                        if let Some(trade) = trade_result {
+                        if let Some(trade) = result.trade {
                             let mode_label = if ws_conn.is_some() { "LIVE" } else { "PAPER" };
                             tracing::info!(
                                 "[{}] ${:.2} profit on {} {} | {}@{:.3} + {}@{:.3}",
@@ -457,7 +510,30 @@ async fn main() {
                                 trade.leg2_odds,
                             );
                             poll_db.mark_arb_traded(&arb_id);
-                            traded_keys.insert(trade_key, std::time::Instant::now());
+                            if live_execution_available {
+                                let entry =
+                                    family_dedup.record_lock(&candidate_to_trade, "both_filled");
+                                tracing::info!(
+                                    "[FAMILY DEDUP] Locked {} for {}s after fill (key={})",
+                                    entry.event_id,
+                                    family_dedup.ttl_secs(),
+                                    entry.key
+                                );
+                                let _ = attempt_telemetry::emit_event(
+                                    "FAMILY_DEDUP_LOCKED",
+                                    None,
+                                    json!({
+                                        "key": entry.key,
+                                        "reason": entry.reason,
+                                        "event_id": entry.event_id,
+                                        "sport": entry.sport,
+                                        "soft_venue": entry.soft_venue,
+                                        "market_type": entry.market_type,
+                                        "period": entry.period,
+                                        "expires_at_ms": entry.expires_at_ms,
+                                    }),
+                                );
+                            }
 
                             // Record in safety modules
                             rl.record(&candidate.leg1_venue);
@@ -473,7 +549,7 @@ async fn main() {
             }
 
             // Clean up expired dedup entries
-            traded_keys.retain(|_, last| last.elapsed() < dedup_cooldown * 3);
+            family_dedup.prune_expired();
 
             // Broadcast poll status
             for venue in config::VENUES {

@@ -7,7 +7,7 @@ pub fn try_execute(
     db: &Arc<Db>,
     candidate: &ArbCandidate,
     settings: &Settings,
-) -> Option<PaperTrade> {
+) -> Option<ExecutionResult> {
     let min_arb_pct = settings.min_arb_pct / 100.0;
     if candidate.arb_pct < min_arb_pct {
         return None;
@@ -73,5 +73,5 @@ pub fn try_execute(
     };
 
     db.insert_trade(&trade);
-    Some(trade)
+    Some(ExecutionResult::trade(trade))
 }
