@@ -1452,6 +1452,13 @@ pub async fn try_execute(
         };
 
         if pin_yank::is_blacklisted(pin_mkt_id) {
+            tracing::info!(
+                "[PIN YANK SKIP] recently unavailable Pinnacle market {}; skipping {} {} {} before soft leg",
+                pin_mkt_id,
+                candidate.sport,
+                candidate.market_type,
+                candidate.event_id
+            );
             emit_attempt(
                 "PIN_YANK_BLACKLIST_SKIP",
                 &attempt_id,
