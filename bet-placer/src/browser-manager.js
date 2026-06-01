@@ -30,7 +30,7 @@ class BrowserManager {
 
     const context = await chromium.launchPersistentContext(userDataDir, {
       headless: false,
-      channel: "chrome",
+      channel: "msedge",
       viewport: null, // use full window size
       args: [
         "--disable-blink-features=AutomationControlled",
