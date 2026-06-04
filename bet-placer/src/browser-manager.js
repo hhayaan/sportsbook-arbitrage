@@ -13,7 +13,7 @@ class BrowserManager {
   }
 
   /**
-   * Launch a persistent Chrome window for a sportsbook.
+   * Launch a persistent Microsoft Edge window for a sportsbook.
    * Uses a separate Chromium user-data-dir per book (isolated sessions),
    * matching CheatKode's approach.
    */

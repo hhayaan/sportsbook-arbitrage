@@ -16,7 +16,7 @@ Rust Engine (port 3401)
   - exposes REST and WebSocket APIs
 
 Bet Placer (Node.js, port 3402)
-  - launches Patchright Chrome profiles for DraftKings, FanDuel, Pinnacle
+  - launches Patchright Microsoft Edge profiles for DraftKings, FanDuel, Pinnacle
   - keeps authenticated browser sessions alive
   - receives quote/place/balance commands over WebSocket
   - places live bets through sportsbook adapters
@@ -67,7 +67,7 @@ The engine is designed to:
                     | Node Bet Placer              |
                     | bet-placer/index.js          |
                     | WS server: localhost:3402    |
-                    | Patchright Chrome profiles   |
+                    | Patchright Edge profiles     |
                     +------------------------------+
 
                     +------------------------------+
@@ -115,7 +115,7 @@ The following modules exist but are not wired into the current primary execution
 
 - Windows with the MSVC Rust toolchain.
 - Node.js.
-- Chrome installed for Patchright.
+- Microsoft Edge installed for Patchright.
 - GeoComply PLC running for FanDuel.
 - Logged-in DraftKings, FanDuel, and Pinnacle browser sessions for live mode.
 - Ontario/CA sportsbook accounts and endpoints.
@@ -165,7 +165,7 @@ cd C:\dev\sportsbook-arbitrage\bet-placer
 node index.js
 ```
 
-Log in to DraftKings, FanDuel, and Pinnacle in the opened Chrome windows. In the bet placer terminal, run:
+Log in to DraftKings, FanDuel, and Pinnacle in the opened Edge windows. In the bet placer terminal, run:
 
 ```text
 balance

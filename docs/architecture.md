@@ -33,6 +33,8 @@ bet-placer
   - Pinnacle browser/API adapter
 ```
 
+The bet placer currently launches Patchright Chromium with the `msedge` channel. It uses Microsoft Edge windows with isolated persistent profiles under the root `data\profiles\<bookId>` directory.
+
 Default ports:
 
 | Port | Process | Purpose |
@@ -254,7 +256,7 @@ Runtime files:
 
 - `data/events.jsonl`;
 - `data/bets/<attempt_id>.jsonl`;
-- `data/naked-legs.json`.
+- `data/naked-legs.json`;
 - `data/family-dedup.json`.
 
 Detector diagnostics, when enabled, are written into the same JSONL telemetry stream.
