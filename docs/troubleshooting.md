@@ -37,18 +37,18 @@ Confirm:
 - DK proxy listens on `3403`;
 - bet placer listens on `3402`;
 - Pinnacle auth odds bridge listens on `3404`;
-- bet placer opens Microsoft Edge sportsbook windows;
+- bet placer opens Google Chrome sportsbook windows;
 - engine prints `Arb Engine V6`;
 - engine settings include `pin_odds_source=auth`;
 - live mode prints WebSocket connection and live balances.
 
-## Edge Browser Does Not Launch
+## Chrome Browser Does Not Launch
 
 Current behavior:
 
-- The bet placer uses Patchright with the `msedge` channel.
-- Microsoft Edge must be installed and discoverable by Patchright.
-- Each book uses a persistent Edge profile under `data\profiles\<bookId>`.
+- The bet placer uses Patchright with the `chrome` channel.
+- Google Chrome must be installed and discoverable by Patchright.
+- Each book uses a persistent Chrome profile under `data\profiles\<bookId>`.
 
 Checks:
 
@@ -59,10 +59,10 @@ cd C:\dev\sportsbook-arbitrage\bet-placer
 npm start
 ```
 
-- Confirm Edge windows open for DraftKings, FanDuel, and Pinnacle.
-- If Edge launches but balances fail, log in again in each opened Edge window and retry the `balance` command.
-- If Edge does not launch at all, inspect `bet-placer\src\browser-manager.js` and confirm the channel is `msedge`.
-- Chrome is no longer required for the current runtime unless the browser channel is reverted to `chrome`.
+- Confirm Chrome windows open for DraftKings, FanDuel, and Pinnacle.
+- If Chrome launches but balances fail, log in again in each opened Chrome window and retry the `balance` command.
+- If Chrome does not launch at all, inspect `bet-placer\src\browser-manager.js` and confirm the channel is `chrome`.
+- Microsoft Edge is not required for the current runtime unless the browser channel is changed to `msedge`.
 
 ## Live Mode Acts Like Paper Mode
 

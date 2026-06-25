@@ -9,7 +9,7 @@ Install:
 - Rust stable with Cargo;
 - Node.js 20 or newer;
 - npm;
-- Microsoft Edge;
+- Google Chrome;
 - Windows MSVC build tools.
 
 Check versions:
@@ -95,11 +95,11 @@ The bet placer starts:
 
 - WebSocket on `ws://localhost:3402`;
 - authenticated Pinnacle odds bridge on `http://localhost:3404`;
-- Microsoft Edge browser contexts for DraftKings, FanDuel, and Pinnacle.
+- Google Chrome browser contexts for DraftKings, FanDuel, and Pinnacle.
 
 Log in manually in the opened sportsbook browsers. Authenticated Pinnacle scanning requires the Pinnacle browser to be logged in.
 
-The current Patchright browser channel is hardcoded to `msedge` in `bet-placer\src\browser-manager.js`. Chrome is not required for the current runtime unless that channel is reverted.
+The current Patchright browser channel is hardcoded to `chrome` in `bet-placer\src\browser-manager.js`. Google Chrome must be installed and discoverable by Patchright.
 
 ## Run Scan/Paper Mode
 

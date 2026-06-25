@@ -1,6 +1,9 @@
 # Dependencies
 node_modules/
 
+# Temporary documentation
+docs/HARs/
+
 # Browser profiles and session data
 data/profiles/
 data/cookies/

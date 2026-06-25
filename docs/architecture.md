@@ -33,7 +33,7 @@ bet-placer
   - Pinnacle browser/API adapter
 ```
 
-The bet placer currently launches Patchright Chromium with the `msedge` channel. It uses Microsoft Edge windows with isolated persistent profiles under the root `data\profiles\<bookId>` directory.
+The bet placer currently launches Patchright Chromium with the `chrome` channel. It uses Google Chrome windows with isolated persistent profiles under the root `data\profiles\<bookId>` directory.
 
 Default ports:
 

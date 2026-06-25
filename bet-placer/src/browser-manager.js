@@ -13,7 +13,7 @@ class BrowserManager {
   }
 
   /**
-   * Launch a persistent Microsoft Edge window for a sportsbook.
+   * Launch a persistent Chrome window for a sportsbook.
    * Uses a separate Chromium user-data-dir per book (isolated sessions),
    * matching CheatKode's approach.
    */
@@ -30,7 +30,7 @@ class BrowserManager {
 
     const context = await chromium.launchPersistentContext(userDataDir, {
       headless: false,
-      channel: "msedge",
+      channel: "chrome",
       viewport: null, // use full window size
       args: [
         "--disable-blink-features=AutomationControlled",
