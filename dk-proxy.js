@@ -1,4 +1,4 @@
-// DK Proxy — works around Rust reqwest TLS incompatibility with DK's CDN on Windows.
+// DK Proxy - works around Rust reqwest TLS incompatibility with DK's CDN on Windows.
 // Uses Node's fetch API which handles TLS correctly.
 // Listens on port 3403.
 
@@ -16,16 +16,37 @@ const DK_FETCH_TIMEOUT_MS = Number.isFinite(configuredFetchTimeoutMs)
   : 2500;
 const DK_HOST = "sportsbook-nash.draftkings.com";
 
+function buildDraftKingsUrl(reqUrl) {
+  const leagueMatch = reqUrl.match(/^\/dk\/(\d+)/);
+  if (leagueMatch) {
+    return `https://${DK_HOST}/sites/CA-ON-SB/api/sportscontent/dkcaon/v1/leagues/${leagueMatch[1]}`;
+  }
+
+  const eventSubcategoryMatch = reqUrl.match(/^\/dk-event\/(\d+)\/(\d+)/);
+  if (eventSubcategoryMatch) {
+    const eventId = eventSubcategoryMatch[1];
+    const subcategoryId = eventSubcategoryMatch[2];
+    const marketsQuery = `$filter=eventId eq '${eventId}' AND clientMetadata/subCategoryId eq '${subcategoryId}' AND tags/all(t: t ne 'SportcastBetBuilder')`;
+    const params = new URLSearchParams({
+      isBatchable: "false",
+      templateVars: `${eventId},${subcategoryId}`,
+      marketsQuery,
+      entity: "markets",
+    });
+    return `https://${DK_HOST}/sites/CA-ON-SB/api/sportscontent/controldata/event/eventSubcategory/v1/markets?${params}`;
+  }
+
+  return null;
+}
+
 const server = http.createServer(async (req, res) => {
-  const match = req.url.match(/^\/dk\/(\d+)/);
-  if (!match) {
+  const dkUrl = buildDraftKingsUrl(req.url);
+  if (!dkUrl) {
     res.writeHead(404);
-    res.end("Not found. Use /dk/{leagueId}");
+    res.end("Not found. Use /dk/{leagueId} or /dk-event/{eventId}/{subcategoryId}");
     return;
   }
 
-  const leagueId = match[1];
-  const dkUrl = `https://${DK_HOST}/sites/CA-ON-SB/api/sportscontent/dkcaon/v1/leagues/${leagueId}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), DK_FETCH_TIMEOUT_MS);
 
@@ -45,13 +66,13 @@ const server = http.createServer(async (req, res) => {
       "Access-Control-Allow-Origin": "*",
     });
     res.end(body);
-    console.log(`[DK Proxy] /dk/${leagueId} → ${resp.status} (${body.length} bytes)`);
+    console.log(`[DK Proxy] ${req.url} -> ${resp.status} (${body.length} bytes)`);
   } catch (err) {
     clearTimeout(timeout);
     const message = err.name === "AbortError"
       ? `timeout after ${DK_FETCH_TIMEOUT_MS}ms`
       : err.message;
-    console.error(`[DK Proxy] Error fetching league ${leagueId}: ${message}`);
+    console.error(`[DK Proxy] Error fetching ${req.url}: ${message}`);
     res.writeHead(502);
     res.end(JSON.stringify({ error: message }));
   }
@@ -60,6 +81,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`[DK Proxy] Listening on http://localhost:${PORT}`);
   console.log(`[DK Proxy] Route: /dk/{leagueId} -> ${DK_HOST}`);
+  console.log(`[DK Proxy] Route: /dk-event/{eventId}/{subcategoryId} -> ${DK_HOST}`);
 });
 
 process.on("SIGINT", () => {

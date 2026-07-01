@@ -198,6 +198,16 @@ pub fn detect_arbs(
                                 event_id: key.event_id.clone(),
                                 sport: ea.sport.clone(),
                                 market_type: key.market_type.clone(),
+                                surface_key: if key.surface_key.is_empty() {
+                                    None
+                                } else {
+                                    Some(key.surface_key.clone())
+                                },
+                                player_name: ea
+                                    .player_name
+                                    .clone()
+                                    .or_else(|| eb.player_name.clone()),
+                                prop_type: ea.prop_type.clone().or_else(|| eb.prop_type.clone()),
                                 period: key.period.clone(),
                                 start_time_utc: ea.start_time_utc.clone(),
                                 leg1_venue: ea.venue.clone(),
@@ -409,6 +419,13 @@ pub fn analyze(
                             event_id: key.event_id.clone(),
                             sport: ea.sport.clone(),
                             market_type: key.market_type.clone(),
+                            surface_key: if key.surface_key.is_empty() {
+                                None
+                            } else {
+                                Some(key.surface_key.clone())
+                            },
+                            player_name: ea.player_name.clone().or_else(|| eb.player_name.clone()),
+                            prop_type: ea.prop_type.clone().or_else(|| eb.prop_type.clone()),
                             period: key.period.clone(),
                             start_time_utc: ea.start_time_utc.clone(),
                             leg1_venue: ea.venue.clone(),

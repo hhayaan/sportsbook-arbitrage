@@ -173,7 +173,7 @@ class DraftKingsAdapter {
   }) {
     const url = `${HOSTS.gaming}/api/wager/v1/placeBets`;
     const selectionObj = { id: selectionId, trueOdds, displayOdds };
-    if (points !== undefined) selectionObj.points = points;
+    if (points !== undefined && points !== null) selectionObj.points = points;
     const body = {
       bets: [
         {

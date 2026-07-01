@@ -48,10 +48,14 @@ pub fn verify_leg(
     let identity_key = MarketIdentityKey {
         event_id: candidate.event_id.clone(),
         market_type: candidate.market_type.clone(),
+        surface_key: candidate.surface_key.clone().unwrap_or_default(),
         line_key,
         period: candidate.period.clone(),
         is_live: false,
-        player_key: String::new(),
+        player_key: match (&candidate.player_name, &candidate.prop_type) {
+            (Some(name), Some(prop)) => format!("{}:{}", name, prop),
+            _ => String::new(),
+        },
     };
 
     let entries = book
@@ -96,6 +100,7 @@ mod tests {
             league: "NBA".into(),
             start_time_utc: "2026-03-15T20:00:00Z".into(),
             market_type: "moneyline".into(),
+            surface_key: None,
             selection: selection.into(),
             line: None,
             period: "full_game".into(),
@@ -117,6 +122,9 @@ mod tests {
             event_id: "NBA:2026-03-15:LAL-vs-BOS".into(),
             sport: "NBA".into(),
             market_type: "moneyline".into(),
+            surface_key: None,
+            player_name: None,
+            prop_type: None,
             period: "full_game".into(),
             start_time_utc: "2026-03-15T20:00:00Z".into(),
             leg1_venue: "draftkings".into(),

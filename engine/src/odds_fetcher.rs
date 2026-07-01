@@ -3,7 +3,7 @@ use crate::models::CanonicalMarket;
 use crate::team_names;
 use reqwest::Client;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_ODDS_FETCH_TIMEOUT_MS: u64 = 2_500;
@@ -26,24 +26,62 @@ fn odds_fetch_timeout() -> Duration {
 
 /// Detect market period from label text (DK/FD market names).
 fn detect_period(label: &str) -> &'static str {
-    let lower = label.to_lowercase();
-    if lower.contains("1st half") || lower.contains("first half") {
+    normalize_period_label(label)
+}
+
+fn normalize_period_label(label: &str) -> &'static str {
+    let lower = label.to_ascii_lowercase();
+    if lower.contains("00:00-09:59") || lower.contains("00:00-9:59") {
+        "first_period_0_10"
+    } else if lower.contains("00:00-04:59") || lower.contains("00:00-4:59") {
+        "first_period_0_5"
+    } else if lower.contains("1st inning") || lower.contains("1st_inning") {
+        "first_inning"
+    } else if lower.contains("2nd inning") || lower.contains("2nd_inning") {
+        "second_inning"
+    } else if lower.contains("3rd inning") || lower.contains("3rd_inning") {
+        "third_inning"
+    } else if lower.contains("4th inning") || lower.contains("4th_inning") {
+        "fourth_inning"
+    } else if lower.contains("5th inning") || lower.contains("5th_inning") {
+        "fifth_inning"
+    } else if lower.contains("6th inning") || lower.contains("6th_inning") {
+        "sixth_inning"
+    } else if lower.contains("7th inning") || lower.contains("7th_inning") {
+        "seventh_inning"
+    } else if lower.contains("8th inning") || lower.contains("8th_inning") {
+        "eighth_inning"
+    } else if lower.contains("9th inning") || lower.contains("9th_inning") {
+        "ninth_inning"
+    } else if lower.contains("first 3 innings") || lower.contains("3_innings") {
+        "first_3_innings"
+    } else if lower.contains("first 5 innings")
+        || lower.contains("1st half")
+        || lower.contains("first half")
+        || lower.contains("1st_half")
+    {
         "first_half"
     } else if lower.contains("2nd half") || lower.contains("second half") {
         "second_half"
-    } else if lower.contains("1st quarter") || lower.contains("1q") {
+    } else if lower.contains("first 7 innings") || lower.contains("7_innings") {
+        "first_7_innings"
+    } else if lower.contains("1st quarter") || lower.contains("1st_quarter") || lower.contains("1q")
+    {
         "first_quarter"
-    } else if lower.contains("2nd quarter") || lower.contains("2q") {
+    } else if lower.contains("2nd quarter") || lower.contains("2nd_quarter") || lower.contains("2q")
+    {
         "second_quarter"
-    } else if lower.contains("3rd quarter") || lower.contains("3q") {
+    } else if lower.contains("3rd quarter") || lower.contains("3rd_quarter") || lower.contains("3q")
+    {
         "third_quarter"
-    } else if lower.contains("4th quarter") || lower.contains("4q") {
+    } else if lower.contains("4th quarter") || lower.contains("4th_quarter") || lower.contains("4q")
+    {
         "fourth_quarter"
-    } else if lower.contains("1st period") {
+    } else if lower.contains("1st period") || lower.contains("1st_period") {
         "first_period"
-    } else if lower.contains("2nd period") {
+    } else if lower.contains("2nd period") || lower.contains("2nd_period") {
         "second_period"
-    } else if lower.contains("3rd period") {
+    } else if lower.contains("3rd period") || lower.contains("3rd_period") {
         "third_period"
     } else if lower.contains("60 min") || lower.contains("3 way") || lower.contains("3-way") {
         "regulation"
@@ -60,18 +98,40 @@ fn american_to_decimal(american: f64) -> f64 {
     }
 }
 
+fn env_bool(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(raw) => matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => default,
+    }
+}
+
+fn expanded_market_scan_enabled() -> bool {
+    env_bool("EXPANDED_MARKET_SCAN", true)
+}
+
+fn expanded_market_max_events() -> usize {
+    std::env::var("EXPANDED_MARKET_MAX_EVENTS_PER_SPORT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(8)
+}
+
 fn pinnacle_period_label(period: u64) -> Option<&'static str> {
     match period {
         0 => Some("full_game"),
         1 => Some("first_half"),
         2 => Some("second_half"),
         3 => Some("first_3_innings"),
-        4 => Some("inning_4"),
-        5 => Some("inning_5"),
+        4 => Some("fourth_inning"),
+        5 => Some("fifth_inning"),
         6 => Some("regulation"),
-        7 => Some("inning_7"),
-        8 => Some("inning_8"),
-        9 => Some("inning_9"),
+        7 => Some("seventh_inning"),
+        8 => Some("eighth_inning"),
+        9 => Some("ninth_inning"),
         _ => None,
     }
 }
@@ -127,6 +187,127 @@ pub fn draftkings_proxy_base_url() -> String {
     format!("http://127.0.0.1:{}", port)
 }
 
+fn dedup_markets(markets: Vec<CanonicalMarket>) -> Vec<CanonicalMarket> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(markets.len());
+    for market in markets {
+        let key = format!(
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            market.venue,
+            market.venue_market_id,
+            market.selection,
+            market.line.map(|v| format!("{:.1}", v)).unwrap_or_default(),
+            market.period,
+            market.market_type,
+            market.surface_key.clone().unwrap_or_default(),
+            market.player_name.clone().unwrap_or_default(),
+            market.prop_type.clone().unwrap_or_default(),
+        );
+        if seen.insert(key) {
+            out.push(market);
+        }
+    }
+    out
+}
+
+fn over_under_selection(label: &str) -> Option<&'static str> {
+    let lower = label.trim().to_ascii_lowercase();
+    if lower == "o" || lower == "over" || lower.starts_with("over ") || lower.contains(" over") {
+        Some("over")
+    } else if lower == "u"
+        || lower == "under"
+        || lower.starts_with("under ")
+        || lower.contains(" under")
+    {
+        Some("under")
+    } else {
+        None
+    }
+}
+
+fn extract_first_number(raw: &str) -> Option<f64> {
+    let mut buf = String::new();
+    let mut started = false;
+    for c in raw.chars() {
+        if c.is_ascii_digit() || c == '.' || (!started && c == '-') {
+            started = true;
+            buf.push(c);
+        } else if started {
+            break;
+        }
+    }
+    if started {
+        buf.parse::<f64>().ok()
+    } else {
+        None
+    }
+}
+
+fn prop_type_from_text(raw: &str) -> Option<&'static str> {
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("points")
+        && (lower.contains("rebounds") || lower.contains("reb"))
+        && (lower.contains("assists") || lower.contains("ast"))
+    {
+        Some("pra")
+    } else if lower.contains("points") && (lower.contains("rebounds") || lower.contains("reb")) {
+        Some("pr")
+    } else if lower.contains("points") && (lower.contains("assists") || lower.contains("ast")) {
+        Some("pa")
+    } else if (lower.contains("rebounds") || lower.contains("reb"))
+        && (lower.contains("assists") || lower.contains("ast"))
+    {
+        Some("ra")
+    } else if lower.contains("made threes")
+        || lower.contains("3 point")
+        || lower.contains("3-point")
+        || lower.contains("three")
+        || lower.contains("threes")
+    {
+        Some("threes")
+    } else if lower.contains("points") || lower.contains("pts") {
+        Some("points")
+    } else if lower.contains("rebound") || lower.contains("reb") {
+        Some("rebounds")
+    } else if lower.contains("assist") || lower.contains("ast") {
+        Some("assists")
+    } else if lower.contains("block") {
+        Some("blocks")
+    } else if lower.contains("steal") {
+        Some("steals")
+    } else if lower.contains("save") {
+        Some("saves")
+    } else if lower.contains("shot") && lower.contains("goal") {
+        Some("sog")
+    } else if lower.contains("goal") {
+        Some("goals")
+    } else if lower.contains("strikeout") {
+        Some("strikeouts")
+    } else if lower.contains("pitching outs") || lower.contains("outs recorded") {
+        Some("pitching_outs")
+    } else if lower.contains("hits allowed") {
+        Some("hits_allowed")
+    } else if lower.contains("earned runs") {
+        Some("earned_runs")
+    } else if lower.contains("total bases") {
+        Some("total_bases")
+    } else if lower.contains("home runs") {
+        Some("home_runs")
+    } else if lower.contains("runs") {
+        Some("runs")
+    } else {
+        None
+    }
+}
+
+fn player_surface_key(prop_type: &str, player_name: &str, period: &str) -> String {
+    format!("player:{}:{}:{}", prop_type, player_name, period)
+}
+
+fn team_total_surface_key(team: &str) -> String {
+    format!("team_total:{}", team)
+}
+
 pub async fn fetch_all(client: &Client) -> Vec<CanonicalMarket> {
     let sports = config::sports();
     let mut handles: Vec<tokio::task::JoinHandle<Vec<CanonicalMarket>>> = Vec::new();
@@ -144,7 +325,7 @@ pub async fn fetch_all(client: &Client) -> Vec<CanonicalMarket> {
                         markets
                     }
                     Err(e) => {
-                        tracing::warn!("[DK] {} fetch failed: {}", name, e);
+                        tracing::warn!("[DK]  {:<10} fetch failed: {}", name, e);
                         Vec::new()
                     }
                 }
@@ -162,7 +343,7 @@ pub async fn fetch_all(client: &Client) -> Vec<CanonicalMarket> {
                         markets
                     }
                     Err(e) => {
-                        tracing::warn!("[FD] {} fetch failed: {}", name, e);
+                        tracing::warn!("[FD]  {:<10} fetch failed: {}", name, e);
                         Vec::new()
                     }
                 }
@@ -177,7 +358,7 @@ pub async fn fetch_all(client: &Client) -> Vec<CanonicalMarket> {
                         markets
                     }
                     Err(e) => {
-                        tracing::warn!("[FD] {} fetch failed: {}", name, e);
+                        tracing::warn!("[FD]  {:<10} fetch failed: {}", name, e);
                         Vec::new()
                     }
                 }
@@ -201,7 +382,7 @@ pub async fn fetch_all(client: &Client) -> Vec<CanonicalMarket> {
                         markets
                     }
                     Err(e) => {
-                        tracing::warn!("[{}] {} fetch failed: {}", source.log_label(), name, e);
+                        tracing::warn!("[{}] {:<10} fetch failed: {}", source.log_label(), name, e);
                         Vec::new()
                     }
                 }
@@ -216,7 +397,7 @@ pub async fn fetch_all(client: &Client) -> Vec<CanonicalMarket> {
             all.extend(markets);
         }
     }
-    all
+    dedup_markets(all)
 }
 
 // ── DraftKings ──────────────────────────────────────────────────────────────
@@ -309,6 +490,9 @@ async fn fetch_dk_inner(
     let mut markets_by_event: std::collections::HashMap<String, Vec<&Value>> =
         std::collections::HashMap::new();
     for mkt in dk_markets {
+        // The DK league feed only ever contains main markets (main=true: moneyline/run line/total).
+        // Alt ladders and player props live on the per-EVENT feed, not here — see the per-event
+        // fetcher for those. Keep this loop main-only.
         let is_main = mkt.get("main").and_then(|v| v.as_bool()).unwrap_or(false);
         if !is_main {
             continue;
@@ -331,6 +515,8 @@ async fn fetch_dk_inner(
             sels_by_market.entry(val_str(mid)).or_default().push(sel);
         }
     }
+
+    let mut event_contexts = Vec::new();
 
     for (eid_str, event) in &events_map {
         let event_name = event.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -362,6 +548,12 @@ async fn fetch_dk_inner(
         };
 
         let dk_event_id = team_names::canonical_event_id(sport, &dk_away, &dk_home, start_time);
+        event_contexts.push(DkEventContext {
+            event_id: eid_str.clone(),
+            canonical_event_id: dk_event_id.clone(),
+            start_time: start_time.to_string(),
+            is_live,
+        });
 
         for mkt in markets_by_event.get(eid_str).unwrap_or(&Vec::new()) {
             let mkt_name = mkt.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -392,6 +584,15 @@ async fn fetch_dk_inner(
 
                 let line = sel.get("points").and_then(|v| v.as_f64());
                 let sel_normalized = team_names::normalize_selection(&market_type, label, sport);
+                let surface_key = if market_type == "team_total" {
+                    dk_selection_team_name(sel)
+                        .or_else(|| mkt_name.split(':').next().map(|s| s.trim().to_string()))
+                        .map(|team| {
+                            team_total_surface_key(&team_names::normalize_team(&team, sport))
+                        })
+                } else {
+                    None
+                };
 
                 out.push(CanonicalMarket {
                     event_id: dk_event_id.clone(),
@@ -399,6 +600,7 @@ async fn fetch_dk_inner(
                     league: sport.to_string(),
                     start_time_utc: start_time.to_string(),
                     market_type: market_type.clone(),
+                    surface_key,
                     selection: sel_normalized,
                     line,
                     period: detect_period(mkt_name).to_string(),
@@ -416,7 +618,350 @@ async fn fetch_dk_inner(
         }
     }
 
+    if expanded_market_scan_enabled() {
+        out.extend(fetch_dk_event_subcategories(client, sport, &event_contexts, ts).await);
+    }
+
     Ok(out)
+}
+
+#[derive(Clone)]
+struct DkEventContext {
+    event_id: String,
+    canonical_event_id: String,
+    start_time: String,
+    is_live: bool,
+}
+
+const DK_MLB_EVENT_SUBCATEGORIES: &[u64] = &[6686, 11024, 16209, 17319, 17323];
+const DK_NBA_NHL_EVENT_SUBCATEGORIES: &[u64] = &[
+    4741, 4999, 6353, 10285, 11001, 11567, 12040, 12057, 13031, 13748, 13750, 14495, 16213, 16215,
+    16257, 16387, 16388, 16389, 16477, 16479, 16544, 16545, 16546, 16548, 16550, 18002, 18005,
+    18010, 18750, 18757, 18758, 18777,
+];
+
+fn dk_event_subcategory_ids(sport: &str) -> &'static [u64] {
+    match sport {
+        "MLB" => DK_MLB_EVENT_SUBCATEGORIES,
+        "NBA" | "NHL" => DK_NBA_NHL_EVENT_SUBCATEGORIES,
+        _ => &[],
+    }
+}
+
+async fn fetch_dk_event_subcategories(
+    client: &Client,
+    sport: &str,
+    events: &[DkEventContext],
+    ts: u64,
+) -> Vec<CanonicalMarket> {
+    let subcategories = dk_event_subcategory_ids(sport);
+    if subcategories.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for event in events.iter().take(expanded_market_max_events()) {
+        for subcategory_id in subcategories {
+            let proxy_url = format!(
+                "{}/dk-event/{}/{}",
+                draftkings_proxy_base_url(),
+                event.event_id,
+                subcategory_id
+            );
+            match fetch_dk_event_subcategory_inner(client, &proxy_url, sport, event, ts).await {
+                Ok(markets) => {
+                    out.extend(markets);
+                    continue;
+                }
+                Err(e) => tracing::debug!(
+                    "[DK] event subcategory proxy failed event={} subcat={} err={}",
+                    event.event_id,
+                    subcategory_id,
+                    e
+                ),
+            }
+
+            let query = format!(
+                "%24filter%3DeventId%20eq%20%27{}%27%20AND%20clientMetadata%2FsubCategoryId%20eq%20%27{}%27%20AND%20tags%2Fall%28t%3A%20t%20ne%20%27SportcastBetBuilder%27%29",
+                event.event_id, subcategory_id
+            );
+            let direct_url = format!(
+                "https://{}/sites/{}/api/sportscontent/controldata/event/eventSubcategory/v1/markets?isBatchable=false&templateVars={}%2C{}&marketsQuery={}&entity=markets",
+                config::DK_HOSTNAME,
+                config::DK_SITE_CODE,
+                event.event_id,
+                subcategory_id,
+                query
+            );
+            match fetch_dk_event_subcategory_inner(client, &direct_url, sport, event, ts).await {
+                Ok(markets) => out.extend(markets),
+                Err(e) => tracing::debug!(
+                    "[DK] event subcategory direct failed event={} subcat={} err={}",
+                    event.event_id,
+                    subcategory_id,
+                    e
+                ),
+            }
+        }
+    }
+
+    out
+}
+
+async fn fetch_dk_event_subcategory_inner(
+    client: &Client,
+    url: &str,
+    sport: &str,
+    event: &DkEventContext,
+    ts: u64,
+) -> Result<Vec<CanonicalMarket>, String> {
+    let resp = client
+        .get(url)
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        )
+        .header("Accept", "application/json")
+        .timeout(odds_fetch_timeout())
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("status {}", resp.status()));
+    }
+
+    let json: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("json parse: {}", e))?;
+    Ok(parse_dk_event_subcategory_response(&json, sport, event, ts))
+}
+
+fn parse_dk_event_subcategory_response(
+    json: &Value,
+    sport: &str,
+    event: &DkEventContext,
+    ts: u64,
+) -> Vec<CanonicalMarket> {
+    let mut out = Vec::new();
+    let markets = match json.get("markets").and_then(|v| v.as_array()) {
+        Some(markets) => markets,
+        None => return out,
+    };
+    let selections = match json.get("selections").and_then(|v| v.as_array()) {
+        Some(selections) => selections,
+        None => return out,
+    };
+
+    let mut selections_by_market: HashMap<String, Vec<&Value>> = HashMap::new();
+    for selection in selections {
+        if let Some(market_id) = selection.get("marketId").and_then(value_to_string) {
+            selections_by_market
+                .entry(market_id)
+                .or_default()
+                .push(selection);
+        }
+    }
+
+    for market in markets {
+        let market_id = match market.get("id").and_then(value_to_string) {
+            Some(id) => id,
+            None => continue,
+        };
+        let market_name = market.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let market_type_name = market
+            .get("marketType")
+            .and_then(|v| v.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(market_name);
+        let combined_label = format!("{} {}", market_name, market_type_name);
+        let period = detect_period(&combined_label);
+        let base_market_type = resolve_dk_market_type(&combined_label, false);
+        let selections_for_market = selections_by_market.get(&market_id);
+        let selections_for_market = match selections_for_market {
+            Some(selections) => selections,
+            None => continue,
+        };
+        let has_player_participants = selections_for_market
+            .iter()
+            .any(|selection| dk_selection_player_name(selection).is_some());
+        let prop_type = if has_player_participants {
+            prop_type_from_text(&combined_label)
+        } else {
+            None
+        };
+
+        for selection in selections_for_market {
+            let selection_label = selection
+                .get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let selection_id = selection.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            if selection_id.is_empty() {
+                continue;
+            }
+
+            let decimal = match dk_selection_decimal(selection) {
+                Some(decimal) if decimal > 1.0 && decimal < 100.0 => decimal,
+                _ => continue,
+            };
+            let american = dk_selection_american(selection);
+            let points = selection
+                .get("points")
+                .and_then(|v| v.as_f64())
+                .or_else(|| extract_first_number(selection_label));
+
+            if let Some(prop_type) = prop_type {
+                let selection_side = match over_under_selection(selection_label) {
+                    Some(side) => side,
+                    None => continue,
+                };
+                let line = match points {
+                    Some(line) => line,
+                    None => continue,
+                };
+                let player_raw = match dk_selection_player_name(selection) {
+                    Some(name) => name,
+                    None => continue,
+                };
+                let player_name = team_names::normalize_player(&player_raw);
+                if player_name.is_empty() {
+                    continue;
+                }
+                out.push(CanonicalMarket {
+                    event_id: event.canonical_event_id.clone(),
+                    sport: sport.to_string(),
+                    league: sport.to_string(),
+                    start_time_utc: event.start_time.clone(),
+                    market_type: "player_prop".to_string(),
+                    surface_key: Some(player_surface_key(prop_type, &player_name, period)),
+                    selection: selection_side.to_string(),
+                    line: Some(line),
+                    period: period.to_string(),
+                    is_live: event.is_live,
+                    player_name: Some(player_name),
+                    prop_type: Some(prop_type.to_string()),
+                    decimal_odds: decimal,
+                    american_odds: american,
+                    venue: "draftkings".to_string(),
+                    venue_market_id: selection_id.to_string(),
+                    venue_event_id: format!("dk:{}", event.event_id),
+                    received_at_ms: ts,
+                });
+                continue;
+            }
+
+            if base_market_type.is_empty() {
+                continue;
+            }
+
+            let mut surface_key = None;
+            let normalized_selection = if base_market_type == "total" {
+                match over_under_selection(selection_label) {
+                    Some(side) => side.to_string(),
+                    None => continue,
+                }
+            } else if base_market_type == "team_total" {
+                let side = match over_under_selection(selection_label) {
+                    Some(side) => side.to_string(),
+                    None => continue,
+                };
+                if let Some(team_name) = dk_selection_team_name(selection)
+                    .or_else(|| market_name.split(':').next().map(|s| s.trim().to_string()))
+                {
+                    let team = team_names::normalize_team(&team_name, sport);
+                    surface_key = Some(team_total_surface_key(&team));
+                }
+                side
+            } else {
+                team_names::normalize_selection(&base_market_type, selection_label, sport)
+            };
+
+            if (base_market_type == "spread"
+                || base_market_type == "total"
+                || base_market_type == "team_total")
+                && points.is_none()
+            {
+                continue;
+            }
+
+            out.push(CanonicalMarket {
+                event_id: event.canonical_event_id.clone(),
+                sport: sport.to_string(),
+                league: sport.to_string(),
+                start_time_utc: event.start_time.clone(),
+                market_type: base_market_type.clone(),
+                surface_key,
+                selection: normalized_selection,
+                line: points,
+                period: period.to_string(),
+                is_live: event.is_live,
+                player_name: None,
+                prop_type: None,
+                decimal_odds: decimal,
+                american_odds: american,
+                venue: "draftkings".to_string(),
+                venue_market_id: selection_id.to_string(),
+                venue_event_id: format!("dk:{}", event.event_id),
+                received_at_ms: ts,
+            });
+        }
+    }
+
+    out
+}
+
+fn dk_selection_decimal(selection: &Value) -> Option<f64> {
+    selection
+        .get("displayOdds")
+        .and_then(|d| d.get("decimal"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<f64>().ok())
+        .or_else(|| selection.get("trueOdds").and_then(|v| v.as_f64()))
+}
+
+fn dk_selection_american(selection: &Value) -> Option<f64> {
+    selection
+        .get("displayOdds")
+        .and_then(|d| d.get("american"))
+        .and_then(|v| v.as_str())
+        .and_then(parse_american_string)
+}
+
+fn parse_american_string(raw: &str) -> Option<f64> {
+    raw.replace('\u{2212}', "-")
+        .replace('+', "")
+        .parse::<f64>()
+        .ok()
+}
+
+fn dk_selection_player_name(selection: &Value) -> Option<String> {
+    selection
+        .get("participants")
+        .and_then(|v| v.as_array())
+        .and_then(|participants| {
+            participants
+                .iter()
+                .find(|p| p.get("type").and_then(|v| v.as_str()) == Some("Player"))
+                .or_else(|| participants.first())
+        })
+        .and_then(|p| p.get("name").and_then(|v| v.as_str()))
+        .map(str::to_string)
+}
+
+fn dk_selection_team_name(selection: &Value) -> Option<String> {
+    selection
+        .get("participants")
+        .and_then(|v| v.as_array())
+        .and_then(|participants| {
+            participants
+                .iter()
+                .find(|p| p.get("type").and_then(|v| v.as_str()) == Some("Team"))
+                .or_else(|| participants.first())
+        })
+        .and_then(|p| p.get("name").and_then(|v| v.as_str()))
+        .map(str::to_string)
 }
 
 fn parse_dk_offer(
@@ -491,6 +1036,14 @@ fn parse_dk_offer(
                 .or_else(|| outcome.get("points").and_then(|v| v.as_f64()));
 
             let sel_normalized = team_names::normalize_selection(&market_type, selection, sport);
+            let surface_key = if market_type == "team_total" {
+                label
+                    .split(':')
+                    .next()
+                    .map(|team| team_total_surface_key(&team_names::normalize_team(team, sport)))
+            } else {
+                None
+            };
 
             out.push(CanonicalMarket {
                 event_id: dk_event_id.clone(),
@@ -498,6 +1051,7 @@ fn parse_dk_offer(
                 league: sport.to_string(),
                 start_time_utc: start_time.to_string(),
                 market_type: market_type.clone(),
+                surface_key,
                 selection: sel_normalized,
                 line,
                 period: detect_period(label).to_string(),
@@ -529,24 +1083,28 @@ fn parse_dk_event_teams(event_name: &str) -> (String, String) {
     (event_name.to_string(), "unknown".to_string())
 }
 
-fn resolve_dk_market_type(label: &str, is_main: bool) -> String {
+fn resolve_dk_market_type(label: &str, _is_main: bool) -> String {
     let lower = label.to_lowercase();
     if lower.contains("moneyline") || lower == "money line" {
         "moneyline".to_string()
-    } else if lower.contains("spread") || lower.contains("point spread") {
-        if is_main {
-            "spread".to_string()
-        } else {
-            "alt_spread".to_string()
-        }
+    } else if lower.contains("spread")
+        || lower.contains("point spread")
+        || lower.contains("run line")
+        || lower.contains("puck line")
+    {
+        // Main and alternate spreads (incl. MLB run line / NHL puck line) collapse to one type so a
+        // common line that is "main" on one book and "alt" on another still shares an identity
+        // bucket and is matched purely by line.
+        "spread".to_string()
     } else if lower.contains("total") && lower.contains("team") {
         "team_total".to_string()
-    } else if lower.contains("total") || lower.contains("over/under") || lower.contains("o/u") {
-        if is_main {
-            "total".to_string()
-        } else {
-            "alt_total".to_string()
-        }
+    } else if lower.contains("total")
+        || lower.contains("over/under")
+        || lower.contains("o/u")
+        || (lower.contains("runs") && lower.contains("inning"))
+        || (lower.contains("goals") && lower.contains("period"))
+    {
+        "total".to_string()
     } else {
         String::new()
     }
@@ -590,7 +1148,13 @@ async fn fetch_fanduel(
 
         match resp.json::<Value>().await {
             Ok(json) if json.get("attachments").is_some() => {
-                return parse_fd_response(&json, sport);
+                let mut markets = parse_fd_response(&json, sport)?;
+                if expanded_market_scan_enabled() {
+                    let event_ids = fd_event_ids(&json);
+                    markets
+                        .extend(fetch_fanduel_event_pages(client, sport, state, &event_ids).await);
+                }
+                return Ok(dedup_markets(markets));
             }
             Ok(_) => continue,
             Err(e) => {
@@ -638,7 +1202,13 @@ async fn fetch_fanduel_by_event_type(
 
         match resp.json::<Value>().await {
             Ok(json) if json.get("attachments").is_some() => {
-                return parse_fd_response(&json, sport);
+                let mut markets = parse_fd_response(&json, sport)?;
+                if expanded_market_scan_enabled() {
+                    let event_ids = fd_event_ids(&json);
+                    markets
+                        .extend(fetch_fanduel_event_pages(client, sport, state, &event_ids).await);
+                }
+                return Ok(dedup_markets(markets));
             }
             Ok(_) => continue,
             Err(e) => {
@@ -648,6 +1218,85 @@ async fn fetch_fanduel_by_event_type(
         }
     }
     Err(format!("FD {} all states failed", sport))
+}
+
+fn fd_event_ids(json: &Value) -> Vec<String> {
+    json.get("attachments")
+        .and_then(|attachments| attachments.get("events"))
+        .and_then(|events| events.as_object())
+        .map(|events| {
+            events
+                .keys()
+                .take(expanded_market_max_events())
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+async fn fetch_fanduel_event_pages(
+    client: &Client,
+    sport: &str,
+    state: &str,
+    event_ids: &[String],
+) -> Vec<CanonicalMarket> {
+    let mut out = Vec::new();
+    for event_id in event_ids.iter().take(expanded_market_max_events()) {
+        let url = format!(
+            "https://sbapi.{}.sportsbook.fanduel.ca/api/event-page?_ak={}&eventId={}&useCombinedTouchdownsVirtualMarket=true&useQuickBets=true&useQuickBetsMLB=true",
+            state,
+            config::FD_API_KEY,
+            event_id
+        );
+        let resp = match client
+            .get(&url)
+            .header(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            )
+            .header("Accept", "application/json")
+            .timeout(odds_fetch_timeout())
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => resp,
+            Ok(resp) => {
+                tracing::debug!(
+                    "[FD] event-page {} event={} status={}",
+                    sport,
+                    event_id,
+                    resp.status()
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::debug!("[FD] event-page {} event={} err={}", sport, event_id, e);
+                continue;
+            }
+        };
+
+        match resp.json::<Value>().await {
+            Ok(json) if json.get("attachments").is_some() => {
+                match parse_fd_response(&json, sport) {
+                    Ok(markets) => out.extend(markets),
+                    Err(e) => tracing::debug!(
+                        "[FD] event-page parse {} event={} err={}",
+                        sport,
+                        event_id,
+                        e
+                    ),
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::debug!(
+                "[FD] event-page json {} event={} err={}",
+                sport,
+                event_id,
+                e
+            ),
+        }
+    }
+    out
 }
 
 fn parse_fd_response(json: &Value, sport: &str) -> Result<Vec<CanonicalMarket>, String> {
@@ -715,6 +1364,11 @@ fn parse_fd_response(json: &Value, sport: &str) -> Result<Vec<CanonicalMarket>, 
             if market_type.is_empty() {
                 continue;
             }
+            let fd_prop_type = if market_type == "player_prop" {
+                prop_type_from_text(&format!("{} {}", market_name, market_type_raw))
+            } else {
+                None
+            };
 
             // Parse FD event name: "Team A @ Team B" or "Team A v Team B"
             let (fd_away, fd_home) = parse_fd_event_teams(event_name);
@@ -751,10 +1405,72 @@ fn parse_fd_response(json: &Value, sport: &str) -> Result<Vec<CanonicalMarket>, 
                         continue;
                     }
 
-                    let sel_normalized =
-                        team_names::normalize_selection(&market_type, runner_name, sport);
-
-                    let period = detect_period(market_name);
+                    let period = detect_period(&format!("{} {}", market_name, market_type_raw));
+                    let mut surface_key = None;
+                    let mut player_name = None;
+                    let mut prop_type = None;
+                    let (sel_normalized, line) = if market_type == "player_prop" {
+                        let selection = match over_under_selection(runner_name) {
+                            Some(selection) => selection.to_string(),
+                            None => continue,
+                        };
+                        let prop = match fd_prop_type {
+                            Some(prop) => prop,
+                            None => continue,
+                        };
+                        let line = match fd_runner_line(
+                            handicap,
+                            market_name,
+                            market_type_raw,
+                            runner_name,
+                        ) {
+                            Some(line) => line,
+                            None => continue,
+                        };
+                        let player_raw = match fd_player_name(market_name, runner_name) {
+                            Some(player) => player,
+                            None => continue,
+                        };
+                        let normalized_player = team_names::normalize_player(&player_raw);
+                        if normalized_player.is_empty() {
+                            continue;
+                        }
+                        surface_key = Some(player_surface_key(prop, &normalized_player, period));
+                        player_name = Some(normalized_player);
+                        prop_type = Some(prop.to_string());
+                        (selection, Some(line))
+                    } else if market_type == "total" || market_type == "team_total" {
+                        let selection = match over_under_selection(runner_name) {
+                            Some(selection) => selection.to_string(),
+                            None => continue,
+                        };
+                        let line = match fd_runner_line(
+                            handicap,
+                            market_name,
+                            market_type_raw,
+                            runner_name,
+                        ) {
+                            Some(line) => line,
+                            None => continue,
+                        };
+                        if market_type == "team_total" {
+                            if let Some(team) = fd_team_total_team(market_name, runner_name) {
+                                let normalized_team =
+                                    team_names::normalize_team(&team, &resolved_sport);
+                                surface_key = Some(team_total_surface_key(&normalized_team));
+                            }
+                        }
+                        (selection, Some(line))
+                    } else {
+                        (
+                            team_names::normalize_selection(
+                                &market_type,
+                                runner_name,
+                                &resolved_sport,
+                            ),
+                            handicap,
+                        )
+                    };
 
                     // Build adapter-ready selection ID: "marketId:selectionId"
                     let market_id_str = market
@@ -786,13 +1502,15 @@ fn parse_fd_response(json: &Value, sport: &str) -> Result<Vec<CanonicalMarket>, 
                         &event_id_str,
                         start_time,
                         &market_type,
+                        surface_key,
                         &sel_normalized,
-                        handicap,
+                        line,
                         decimal,
                         american,
                         is_live,
                         &adapter_sel_id,
-                        runner_name,
+                        player_name,
+                        prop_type,
                         ts,
                         period,
                     );
@@ -878,13 +1596,15 @@ fn out_push_fd(
     fd_event_id: &str,
     start_time: &str,
     market_type: &str,
+    surface_key: Option<String>,
     selection: &str,
     line: Option<f64>,
     decimal: f64,
     american: Option<f64>,
     is_live: bool,
     adapter_sel_id: &str,
-    _runner_name: &str,
+    player_name: Option<String>,
+    prop_type: Option<String>,
     ts: u64,
     period: &str,
 ) {
@@ -894,12 +1614,13 @@ fn out_push_fd(
         league: sport.to_string(),
         start_time_utc: start_time.to_string(),
         market_type: market_type.to_string(),
+        surface_key,
         selection: selection.to_string(),
         line,
         period: period.to_string(),
         is_live,
-        player_name: None,
-        prop_type: None,
+        player_name,
+        prop_type,
         decimal_odds: decimal,
         american_odds: american,
         venue: "fanduel".to_string(),
@@ -921,10 +1642,90 @@ fn parse_fd_event_teams(event_name: &str) -> (String, String) {
     (event_name.to_string(), "unknown".to_string())
 }
 
+fn fd_runner_line(
+    handicap: Option<f64>,
+    market_name: &str,
+    market_type: &str,
+    runner_name: &str,
+) -> Option<f64> {
+    handicap
+        .filter(|value| *value != 0.0)
+        .or_else(|| {
+            let lower_runner = runner_name.to_ascii_lowercase();
+            if lower_runner.contains(" over ") || lower_runner.contains(" under ") {
+                lower_runner
+                    .split(" over ")
+                    .nth(1)
+                    .or_else(|| lower_runner.split(" under ").nth(1))
+                    .and_then(extract_first_number)
+            } else {
+                None
+            }
+        })
+        .or_else(|| extract_first_number(market_name))
+        .or_else(|| extract_first_number(market_type))
+}
+
+fn fd_player_name(market_name: &str, runner_name: &str) -> Option<String> {
+    if let Some((player, _)) = market_name.split_once(" - ") {
+        let player = player.trim();
+        if !player.is_empty() {
+            return Some(player.to_string());
+        }
+    }
+
+    let lower = runner_name.to_ascii_lowercase();
+    for token in [" over", " under"] {
+        if let Some(idx) = lower.find(token) {
+            let player = runner_name[..idx].trim();
+            if !player.is_empty() {
+                return Some(player.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn fd_team_total_team(market_name: &str, runner_name: &str) -> Option<String> {
+    for raw in [runner_name, market_name] {
+        let lower = raw.to_ascii_lowercase();
+        for token in [" over", " under", " total"] {
+            if let Some(idx) = lower.find(token) {
+                let team = raw[..idx].trim();
+                if !team.is_empty() {
+                    return Some(team.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn fd_unsupported_market(market_type: &str, market_name: &str) -> bool {
+    let lower = format!("{} {}", market_type, market_name).to_ascii_lowercase();
+    lower.contains("odd/even")
+        || lower.contains("bands")
+        || lower.contains("double")
+        || lower.contains("parlay")
+        || lower.contains("tri-bet")
+        || lower.contains("race_to")
+        || lower.contains("race to")
+        || lower.contains("exact")
+        || lower.contains("correct_score")
+        || lower.contains("winning_margin")
+}
+
 fn resolve_fd_market_type(market_type: &str, market_name: &str) -> String {
     let lower_type = market_type.to_lowercase();
     let lower_name = market_name.to_lowercase();
-    if lower_type.contains("moneyline")
+    if fd_unsupported_market(market_type, market_name) {
+        String::new()
+    } else if lower_type.contains("player_")
+        || lower_type.contains("pitcher_")
+        || (lower_name.contains(" - ") && prop_type_from_text(&lower_name).is_some())
+    {
+        "player_prop".to_string()
+    } else if lower_type.contains("moneyline")
         || lower_name.contains("moneyline")
         || lower_type.contains("match_betting")
         || lower_type.contains("match betting")
@@ -933,13 +1734,23 @@ fn resolve_fd_market_type(market_type: &str, market_name: &str) -> String {
     } else if lower_type.contains("spread")
         || lower_name.contains("spread")
         || lower_type.contains("handicap")
+        || lower_type.contains("run_line")
+        || lower_name.contains("run line")
+        || lower_type.contains("puck_line")
+        || lower_name.contains("puck line")
     {
         "spread".to_string()
-    } else if lower_type.contains("team_total") || lower_name.contains("team total") {
+    } else if lower_type.contains("team_total")
+        || lower_name.contains("team total")
+        || lower_type.contains("home_total_runs")
+        || lower_type.contains("away_total_runs")
+        || lower_name.ends_with("total runs")
+    {
         "team_total".to_string()
     } else if lower_type.contains("total")
         || lower_name.contains("total")
         || lower_name.contains("over/under")
+        || lower_type.contains("over/under")
     {
         "total".to_string()
     } else {
@@ -1004,7 +1815,22 @@ async fn fetch_pinnacle_authenticated(
         .get("markets")
         .ok_or_else(|| format!("authenticated snapshot {} missing markets", sport))?;
 
-    parse_pinnacle_markets(sport, matchups_json, markets_json, now_ms())
+    let ts = now_ms();
+    let mut out = parse_pinnacle_markets(sport, matchups_json, markets_json, ts)?;
+    if expanded_market_scan_enabled() {
+        if let (Some(related_matchups), Some(related_markets)) =
+            (json.get("related_matchups"), json.get("related_markets"))
+        {
+            out.extend(parse_pinnacle_related_markets(
+                sport,
+                matchups_json,
+                related_matchups,
+                related_markets,
+                ts,
+            )?);
+        }
+    }
+    Ok(dedup_markets(out))
 }
 
 async fn fetch_pinnacle_guest(
@@ -1066,7 +1892,19 @@ async fn fetch_pinnacle_guest(
 
     let markets_json: Value = markets_resp.json().await.map_err(|e| e.to_string())?;
     let ts = now_ms();
-    parse_pinnacle_markets(sport, &matchups_json, &markets_json, ts)
+    let mut out = parse_pinnacle_markets(sport, &matchups_json, &markets_json, ts)?;
+    if expanded_market_scan_enabled() {
+        let (related_matchups, related_markets) =
+            fetch_pinnacle_guest_related(client, sport, &matchups_json).await;
+        out.extend(parse_pinnacle_related_markets(
+            sport,
+            &matchups_json,
+            &related_matchups,
+            &related_markets,
+            ts,
+        )?);
+    }
+    Ok(dedup_markets(out))
 }
 
 fn parse_pinnacle_markets(
@@ -1143,15 +1981,6 @@ fn parse_pinnacle_markets(
                 None => continue,
             };
 
-            // Skip alternate lines — only use main markets
-            let is_alternate = mkt
-                .get("isAlternate")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if is_alternate {
-                continue;
-            }
-
             let mtype = mkt.get("type").and_then(|v| v.as_str()).unwrap_or("");
             let market_type = match mtype {
                 "moneyline" => "moneyline",
@@ -1163,6 +1992,18 @@ fn parse_pinnacle_markets(
 
             let period = mkt.get("period").and_then(|v| v.as_u64()).unwrap_or(0);
             if market_type == "moneyline" && period != 0 {
+                continue;
+            }
+
+            // Include alternate lines for full-game (period 0) so a common line that is "main" on
+            // one book and "alt" on another shares an identity bucket. Period alternates are
+            // deferred until period-label parity is verified across books. marketAltId is resolved
+            // by the adapter from the quote response at place time, so nothing extra is needed here.
+            let is_alternate = mkt
+                .get("isAlternate")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if is_alternate && period != 0 {
                 continue;
             }
 
@@ -1207,6 +2048,11 @@ fn parse_pinnacle_markets(
                     }
                     let selection =
                         team_names::normalize_selection(market_type, &raw_selection, sport);
+                    let surface_key = if market_type == "team_total" {
+                        pin_team_total_surface_key(mkt, &info, sport)
+                    } else {
+                        None
+                    };
 
                     out.push(CanonicalMarket {
                         event_id: pin_event_id.clone(),
@@ -1214,6 +2060,7 @@ fn parse_pinnacle_markets(
                         league: sport.to_string(),
                         start_time_utc: info.start_time.clone(),
                         market_type: market_type.to_string(),
+                        surface_key,
                         selection,
                         line: points,
                         period: period_str.to_string(),
@@ -1258,9 +2105,348 @@ fn parse_pinnacle_markets(
     Ok(out)
 }
 
+async fn fetch_pinnacle_guest_related(
+    client: &Client,
+    sport: &str,
+    matchups_json: &Value,
+) -> (Value, Value) {
+    let mut related_matchups = Vec::new();
+    let mut related_markets = Vec::new();
+    let parent_ids = matchups_json
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter(|m| m.get("type").and_then(|v| v.as_str()) == Some("matchup"))
+                .filter_map(|m| m.get("id").and_then(|v| v.as_u64()))
+                .take(expanded_market_max_events())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    for matchup_id in parent_ids {
+        let related_url = format!(
+            "https://{}/0.1/matchups/{}/related",
+            config::PIN_DOMAIN,
+            matchup_id
+        );
+        match fetch_pinnacle_guest_json(client, &related_url).await {
+            Ok(Value::Array(values)) => related_matchups.extend(values),
+            Ok(_) => {}
+            Err(e) => tracing::debug!(
+                "[PIN] related matchups {} parent={} err={}",
+                sport,
+                matchup_id,
+                e
+            ),
+        }
+
+        let markets_url = format!(
+            "https://{}/0.1/matchups/{}/markets/related/straight",
+            config::PIN_DOMAIN,
+            matchup_id
+        );
+        match fetch_pinnacle_guest_json(client, &markets_url).await {
+            Ok(Value::Array(values)) => related_markets.extend(values),
+            Ok(_) => {}
+            Err(e) => tracing::debug!(
+                "[PIN] related markets {} parent={} err={}",
+                sport,
+                matchup_id,
+                e
+            ),
+        }
+    }
+
+    (
+        Value::Array(related_matchups),
+        Value::Array(related_markets),
+    )
+}
+
+async fn fetch_pinnacle_guest_json(client: &Client, url: &str) -> Result<Value, String> {
+    let resp = client
+        .get(url)
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        )
+        .timeout(odds_fetch_timeout())
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !resp.status().is_success() {
+        return Err(format!("status {}", resp.status()));
+    }
+    resp.json::<Value>().await.map_err(|e| e.to_string())
+}
+
+fn parse_pinnacle_related_markets(
+    sport: &str,
+    parent_matchups_json: &Value,
+    related_matchups_json: &Value,
+    related_markets_json: &Value,
+    ts: u64,
+) -> Result<Vec<CanonicalMarket>, String> {
+    let parent_map = build_pinnacle_matchup_map(parent_matchups_json);
+    let mut special_map: HashMap<u64, PinnacleSpecialInfo> = HashMap::new();
+
+    if let Some(related_matchups) = related_matchups_json.as_array() {
+        for matchup in related_matchups {
+            if matchup.get("type").and_then(|v| v.as_str()) != Some("special") {
+                continue;
+            }
+            let special = match matchup.get("special") {
+                Some(special) => special,
+                None => continue,
+            };
+            if special.get("category").and_then(|v| v.as_str()) != Some("Player Props") {
+                continue;
+            }
+            let special_id = match matchup.get("id").and_then(|v| v.as_u64()) {
+                Some(id) => id,
+                None => continue,
+            };
+            let parent_id = match matchup.get("parentId").and_then(|v| v.as_u64()) {
+                Some(id) => id,
+                None => continue,
+            };
+            let parent = match parent_map.get(&parent_id) {
+                Some(parent) => parent,
+                None => continue,
+            };
+            let description = special
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let (player_name, prop_type) = match parse_pin_special_description(description) {
+                Some(parsed) => parsed,
+                None => continue,
+            };
+
+            let mut participants = HashMap::new();
+            if let Some(parts) = matchup.get("participants").and_then(|v| v.as_array()) {
+                for participant in parts {
+                    let id = match participant.get("id").and_then(|v| v.as_u64()) {
+                        Some(id) => id,
+                        None => continue,
+                    };
+                    let name = participant
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if let Some(selection) = over_under_selection(name) {
+                        participants.insert(id, selection.to_string());
+                    }
+                }
+            }
+            if participants.len() < 2 {
+                continue;
+            }
+
+            special_map.insert(
+                special_id,
+                PinnacleSpecialInfo {
+                    parent_id,
+                    event_id: team_names::canonical_event_id(
+                        sport,
+                        &parent.away,
+                        &parent.home,
+                        &parent.start_time,
+                    ),
+                    start_time: parent.start_time.clone(),
+                    is_live: parent.is_live,
+                    player_name,
+                    prop_type,
+                    participants,
+                },
+            );
+        }
+    }
+
+    let mut out = Vec::new();
+    if let Some(markets) = related_markets_json.as_array() {
+        for market in markets {
+            if market.get("type").and_then(|v| v.as_str()) != Some("total") {
+                continue;
+            }
+            let special_id = match market.get("matchupId").and_then(|v| v.as_u64()) {
+                Some(id) => id,
+                None => continue,
+            };
+            let special = match special_map.get(&special_id) {
+                Some(special) => special,
+                None => continue,
+            };
+            let market_key = market
+                .get("key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("s;0;ou");
+            let period = market
+                .get("period")
+                .and_then(|v| v.as_u64())
+                .and_then(pinnacle_period_label)
+                .unwrap_or("full_game");
+
+            if let Some(prices) = market.get("prices").and_then(|v| v.as_array()) {
+                for price in prices {
+                    let participant_id = match price.get("participantId").and_then(|v| v.as_u64()) {
+                        Some(id) => id,
+                        None => continue,
+                    };
+                    let selection = match special.participants.get(&participant_id) {
+                        Some(selection) => selection.clone(),
+                        None => continue,
+                    };
+                    let line = match price.get("points").and_then(|v| v.as_f64()) {
+                        Some(line) => line,
+                        None => continue,
+                    };
+                    let american_odds = match price.get("price").and_then(|v| v.as_f64()) {
+                        Some(price) if price != 0.0 => price,
+                        _ => continue,
+                    };
+                    let decimal = american_to_decimal(american_odds);
+                    if decimal <= 1.0 || decimal > 100.0 {
+                        continue;
+                    }
+
+                    out.push(CanonicalMarket {
+                        event_id: special.event_id.clone(),
+                        sport: sport.to_string(),
+                        league: sport.to_string(),
+                        start_time_utc: special.start_time.clone(),
+                        market_type: "player_prop".to_string(),
+                        surface_key: Some(player_surface_key(
+                            &special.prop_type,
+                            &special.player_name,
+                            period,
+                        )),
+                        selection,
+                        line: Some(line),
+                        period: period.to_string(),
+                        is_live: special.is_live,
+                        player_name: Some(special.player_name.clone()),
+                        prop_type: Some(special.prop_type.clone()),
+                        decimal_odds: decimal,
+                        american_odds: Some(american_odds),
+                        venue: "pinnacle".to_string(),
+                        venue_market_id: format!(
+                            "SP:{}:{}:{}",
+                            special_id, market_key, participant_id
+                        ),
+                        venue_event_id: format!("pin:{}:sp:{}", special.parent_id, special_id),
+                        received_at_ms: ts,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+fn build_pinnacle_matchup_map(matchups_json: &Value) -> HashMap<u64, MatchupInfo> {
+    let mut matchup_map = HashMap::new();
+    if let Some(arr) = matchups_json.as_array() {
+        for matchup in arr {
+            if matchup.get("type").and_then(|v| v.as_str()) != Some("matchup") {
+                continue;
+            }
+            let id = match matchup.get("id").and_then(|v| v.as_u64()) {
+                Some(id) => id,
+                None => continue,
+            };
+            let start_time = matchup
+                .get("startTime")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let is_live = matchup
+                .get("isLive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let mut home = String::new();
+            let mut away = String::new();
+            let mut home_id = None;
+            let mut away_id = None;
+            if let Some(parts) = matchup.get("participants").and_then(|v| v.as_array()) {
+                for participant in parts {
+                    let alignment = participant
+                        .get("alignment")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let name = participant
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let id = participant.get("id").and_then(|v| v.as_u64());
+                    if alignment == "home" {
+                        home = name.to_string();
+                        home_id = id;
+                    } else if alignment == "away" {
+                        away = name.to_string();
+                        away_id = id;
+                    }
+                }
+            }
+            matchup_map.insert(
+                id,
+                MatchupInfo {
+                    home,
+                    away,
+                    home_id,
+                    away_id,
+                    start_time,
+                    is_live,
+                },
+            );
+        }
+    }
+    matchup_map
+}
+
+fn parse_pin_special_description(description: &str) -> Option<(String, String)> {
+    let player = description.split('(').next()?.trim();
+    if player.is_empty() {
+        return None;
+    }
+    let prop_text = description
+        .split('(')
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .unwrap_or(description);
+    let prop_type = prop_type_from_text(prop_text)?;
+    Some((team_names::normalize_player(player), prop_type.to_string()))
+}
+
+fn pin_team_total_surface_key(market: &Value, info: &MatchupInfo, sport: &str) -> Option<String> {
+    let key = market.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    let side = key.split(';').last().unwrap_or("");
+    let team = match side {
+        "home" => &info.home,
+        "away" => &info.away,
+        _ => return None,
+    };
+    Some(team_total_surface_key(&team_names::normalize_team(
+        team, sport,
+    )))
+}
+
+struct PinnacleSpecialInfo {
+    parent_id: u64,
+    event_id: String,
+    start_time: String,
+    is_live: bool,
+    player_name: String,
+    prop_type: String,
+    participants: HashMap<u64, String>,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{map_fd_soccer_competition, parse_fd_response, parse_pinnacle_markets};
+    use super::*;
     use serde_json::json;
 
     #[test]
@@ -1375,6 +2561,169 @@ mod tests {
 
         let markets = parse_fd_response(&payload, "SOCCER").expect("parse fd soccer");
         assert!(markets.is_empty());
+    }
+
+    #[test]
+    fn dk_event_subcategory_parses_player_prop_over_under() {
+        let payload = json!({
+            "markets": [{
+                "id": "340023994",
+                "name": "Jalen Brunson Assists O/U",
+                "marketType": { "name": "Player Assists O/U" }
+            }],
+            "selections": [
+                {
+                    "id": "over-sel",
+                    "marketId": "340023994",
+                    "label": "Over",
+                    "points": 6.5,
+                    "trueOdds": 1.91,
+                    "displayOdds": { "american": "-110", "decimal": "1.91" },
+                    "participants": [{ "name": "Jalen Brunson", "type": "Player" }]
+                },
+                {
+                    "id": "under-sel",
+                    "marketId": "340023994",
+                    "label": "Under",
+                    "points": 6.5,
+                    "trueOdds": 1.91,
+                    "displayOdds": { "american": "-110", "decimal": "1.91" },
+                    "participants": [{ "name": "Jalen Brunson", "type": "Player" }]
+                }
+            ]
+        });
+        let event = DkEventContext {
+            event_id: "34226734".to_string(),
+            canonical_event_id: "NBA:2026-06-06T00:NYK-vs-SAS".to_string(),
+            start_time: "2026-06-06T00:30:00Z".to_string(),
+            is_live: false,
+        };
+
+        let markets = parse_dk_event_subcategory_response(&payload, "NBA", &event, 1);
+        assert_eq!(markets.len(), 2);
+        assert!(markets.iter().all(|m| m.market_type == "player_prop"));
+        assert!(markets
+            .iter()
+            .all(|m| m.player_name.as_deref() == Some("jalen brunson")));
+        assert!(markets
+            .iter()
+            .all(|m| m.prop_type.as_deref() == Some("assists")));
+        assert!(markets.iter().all(|m| m.line == Some(6.5)));
+        assert!(markets.iter().all(|m| {
+            m.surface_key.as_deref() == Some("player:assists:jalen brunson:full_game")
+        }));
+    }
+
+    #[test]
+    fn fd_event_page_parses_alt_player_prop_line_from_runner_name() {
+        let payload = json!({
+            "attachments": {
+                "events": {
+                    "35669206": {
+                        "eventId": 35669206,
+                        "name": "NY Knicks @ SA Spurs",
+                        "openDate": "2026-06-06T00:30:00.000Z",
+                        "inPlay": false
+                    }
+                },
+                "markets": {
+                    "801.171663780": {
+                        "eventId": 35669206,
+                        "marketId": "801.171663780",
+                        "marketName": "Jalen Brunson - Alt Assists",
+                        "marketType": "PLAYER_A_ALT_TOTAL_ASSISTS",
+                        "runners": [
+                            {
+                                "runnerName": "Jalen Brunson Over 6.5",
+                                "selectionId": 23237967,
+                                "handicap": 0,
+                                "winRunnerOdds": {
+                                    "trueOdds": { "decimalOdds": { "decimalOdds": 1.95 } },
+                                    "americanDisplayOdds": { "americanOdds": -105 }
+                                }
+                            },
+                            {
+                                "runnerName": "Jalen Brunson Under 6.5",
+                                "selectionId": 23237968,
+                                "handicap": 0,
+                                "winRunnerOdds": {
+                                    "trueOdds": { "decimalOdds": { "decimalOdds": 1.87 } },
+                                    "americanDisplayOdds": { "americanOdds": -115 }
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+
+        let markets = parse_fd_response(&payload, "NBA").expect("parse fd event page");
+        assert_eq!(markets.len(), 2);
+        assert!(markets.iter().all(|m| m.market_type == "player_prop"));
+        assert!(markets
+            .iter()
+            .all(|m| m.player_name.as_deref() == Some("jalen brunson")));
+        assert!(markets
+            .iter()
+            .all(|m| m.prop_type.as_deref() == Some("assists")));
+        assert!(markets.iter().all(|m| m.line == Some(6.5)));
+    }
+
+    #[test]
+    fn pinnacle_related_parser_emits_special_player_prop() {
+        let parent_matchups = json!([{
+            "type": "matchup",
+            "id": 1631470750,
+            "startTime": "2026-06-04T17:05:00Z",
+            "isLive": false,
+            "participants": [
+                { "alignment": "home", "name": "Philadelphia Phillies" },
+                { "alignment": "away", "name": "San Diego Padres" }
+            ]
+        }]);
+        let related_matchups = json!([{
+            "id": 1631664241,
+            "type": "special",
+            "parentId": 1631470750,
+            "special": {
+                "category": "Player Props",
+                "description": "Zack Wheeler (Pitching Outs)(must start)"
+            },
+            "participants": [
+                { "id": 1631664242, "name": "Over" },
+                { "id": 1631664243, "name": "Under" }
+            ]
+        }]);
+        let related_markets = json!([{
+            "matchupId": 1631664241,
+            "type": "total",
+            "key": "s;0;ou",
+            "period": 0,
+            "prices": [
+                { "participantId": 1631664242, "points": 18.5, "price": 143 },
+                { "participantId": 1631664243, "points": 18.5, "price": -193 }
+            ]
+        }]);
+
+        let markets = parse_pinnacle_related_markets(
+            "MLB",
+            &parent_matchups,
+            &related_matchups,
+            &related_markets,
+            1,
+        )
+        .expect("parse pinnacle related");
+        assert_eq!(markets.len(), 2);
+        assert!(markets.iter().all(|m| m.market_type == "player_prop"));
+        assert!(markets
+            .iter()
+            .all(|m| m.player_name.as_deref() == Some("zack wheeler")));
+        assert!(markets
+            .iter()
+            .all(|m| m.prop_type.as_deref() == Some("pitching_outs")));
+        assert!(markets
+            .iter()
+            .all(|m| m.venue_market_id.starts_with("SP:1631664241:")));
     }
 
     #[test]

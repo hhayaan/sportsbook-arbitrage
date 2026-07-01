@@ -419,6 +419,20 @@ GET https://sportsbook-nash.draftkings.com/sites/CA-ON-SB/api/sportscontent/dkca
 
 The proxy deadline is `DK_PROXY_FETCH_TIMEOUT_MS`, or `ODDS_FETCH_TIMEOUT_MS`, default `2500`.
 
+Expanded per-event market proxy:
+
+```text
+GET http://localhost:3403/dk-event/{eventId}/{subcategoryId}
+```
+
+Proxy target:
+
+```text
+GET https://sportsbook-nash.draftkings.com/sites/CA-ON-SB/api/sportscontent/controldata/event/eventSubcategory/v1/markets
+```
+
+Rust uses this route only when `EXPANDED_MARKET_SCAN` is enabled. It is used for HAR-backed DK player-prop and per-event line parsing.
+
 ### FanDuel Public Odds
 
 Normal sports:
@@ -447,6 +461,14 @@ FD soccer is parsed by competition metadata before canonical event IDs are built
 
 Unsupported FD soccer competitions are skipped.
 
+Expanded per-event parsing uses FanDuel event-page payloads discovered from the normal page fetch:
+
+```text
+GET https://sbapi.on.sportsbook.fanduel.ca/api/event-page?eventId={eventId}&_ak=FhMFpcPWXMeyZxOx
+```
+
+Rust uses this only when `EXPANDED_MARKET_SCAN` is enabled. The current parser keeps normal two-way line markets and over/under player props, then skips one-sided milestones, bands, exact outcomes, race-to markets, and parlay/combo markets.
+
 ### Pinnacle Authenticated Odds
 
 Rust local bridge:
@@ -462,7 +484,9 @@ Bridge response:
   "status": "ok",
   "league_id": 246,
   "matchups": [],
-  "markets": []
+  "markets": [],
+  "related_matchups": [],
+  "related_markets": []
 }
 ```
 
@@ -471,7 +495,11 @@ The bet placer fetches:
 ```text
 GET https://api.arcadia.pinnacle.com/0.1/leagues/{leagueId}/matchups
 GET https://api.arcadia.pinnacle.com/0.1/leagues/{leagueId}/markets/straight
+GET https://api.arcadia.pinnacle.com/0.1/matchups/{matchupId}/related
+GET https://api.arcadia.pinnacle.com/0.1/matchups/{matchupId}/markets/related/straight
 ```
+
+Related matchups and related markets are included by default for up to `PIN_RELATED_MAX_MATCHUPS` parent events when `PIN_SNAPSHOT_RELATED` is enabled. Rust parses Pinnacle specials with guarded `SP:` venue-market IDs for scan/paper detection. The current placement adapter still treats `SP:` as not live-ready.
 
 Guest mode is opt-in:
 
@@ -547,6 +575,9 @@ Rust:
 | `ODDS_FETCH_TIMEOUT_MS` | Per-odds-request deadline | 2500 |
 | `WS_URL` | Bet placer WebSocket URL | `ws://127.0.0.1:3402` |
 | `LIVE_ALLOWED_PAIRS` | Optional comma-separated live placement pair allowlist, for example `fanduel/pinnacle`; scanning still includes all fetched venues | unset / all pairs |
+| `LIVE_ALLOWED_MARKET_TYPES` | Optional comma-separated live market-type allowlist; defaults keep props scan/paper only | `moneyline,spread,total,team_total` |
+| `EXPANDED_MARKET_SCAN` | Enable HAR-backed per-event/related scanner fanout | true |
+| `EXPANDED_MARKET_MAX_EVENTS_PER_SPORT` | Max events per sport used for expanded DK/FD/PIN fanout per cycle | 8 |
 | `PIN_ODDS_SOURCE` | `auth`, `authenticated`, `logged-in`, `logged_in`, `guest`, or `public` | `auth` |
 | `PIN_AUTH_ODDS_BASE_URL` | Pinnacle auth odds bridge | `http://127.0.0.1:3404` |
 | `QUOTE_TIMEOUT_MS` | General quote timeout | 10000 |
@@ -583,6 +614,8 @@ Node:
 | --- | --- | --- |
 | `WS_PORT` | Bet placer WebSocket port | 3402 |
 | `PIN_ODDS_PORT` | Pinnacle auth odds bridge port | 3404 |
+| `PIN_SNAPSHOT_RELATED` | Include Pinnacle related matchups and related straight markets in authenticated snapshots | true |
+| `PIN_RELATED_MAX_MATCHUPS` | Max parent matchups whose related Pinnacle data is fetched per snapshot | 8 |
 | `DK_PROXY_PORT` | DraftKings proxy port | 3403 |
 | `DK_PROXY_FETCH_TIMEOUT_MS` | DK proxy upstream deadline | 2500 |
 | `FD_WRITE_TIMEOUT_MS` | FD browser-page cashout write timeout | 25000 |

@@ -79,6 +79,7 @@ mod tests {
             league: "NBA".into(),
             start_time_utc: "2026-03-15T20:00:00Z".into(),
             market_type: "moneyline".into(),
+            surface_key: None,
             selection: selection.into(),
             line: None,
             period: "full_game".into(),

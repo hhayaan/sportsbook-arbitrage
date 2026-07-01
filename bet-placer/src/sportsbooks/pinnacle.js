@@ -147,9 +147,49 @@ class PinnacleAdapter {
       throw new Error(`markets failed (${marketsResp.status}): ${marketsResp.body}`);
     }
 
+    const matchups = matchupsResp.json();
+    const markets = marketsResp.json();
+    const relatedMatchups = [];
+    const relatedMarkets = [];
+
+    const includeRelated = !["0", "false", "off"].includes(
+      String(process.env.PIN_SNAPSHOT_RELATED || "1").trim().toLowerCase()
+    );
+    const maxRelated = Number.parseInt(process.env.PIN_RELATED_MAX_MATCHUPS || "8", 10);
+    const relatedLimit = Number.isFinite(maxRelated) && maxRelated > 0 ? maxRelated : 8;
+
+    if (includeRelated) {
+      const parentMatchups = matchups
+        .filter((m) => m && m.type === "matchup" && m.id)
+        .slice(0, relatedLimit);
+      for (const matchup of parentMatchups) {
+        try {
+          const relatedResp = await this._apiRequest(`${API_BASE}/matchups/${matchup.id}/related`);
+          if (relatedResp.status === 200) {
+            const related = relatedResp.json();
+            if (Array.isArray(related)) relatedMatchups.push(...related);
+          }
+        } catch (err) {
+          console.debug(`[PIN] related matchups failed ${matchup.id}: ${err.message}`);
+        }
+
+        try {
+          const relatedMarketsResp = await this._apiRequest(`${API_BASE}/matchups/${matchup.id}/markets/related/straight`);
+          if (relatedMarketsResp.status === 200) {
+            const related = relatedMarketsResp.json();
+            if (Array.isArray(related)) relatedMarkets.push(...related);
+          }
+        } catch (err) {
+          console.debug(`[PIN] related markets failed ${matchup.id}: ${err.message}`);
+        }
+      }
+    }
+
     return {
-      matchups: matchupsResp.json(),
-      markets: marketsResp.json(),
+      matchups,
+      markets,
+      related_matchups: relatedMatchups,
+      related_markets: relatedMarkets,
     };
   }
 
@@ -178,13 +218,31 @@ class PinnacleAdapter {
     const marketKey = parts.slice(1, -1).join(":");
     const designation = parts[parts.length - 1];
 
+    // marketKey grammar: s;{period};{m|ou|s}[;{line}] — for totals/spreads the line (e.g. 8.5)
+    // is the 4th segment. Pinnacle requires `points` in the quote/place body for totals and
+    // spreads (verified against captured accepted bets); moneyline (s;{p};m) has no line.
+    const keySegments = marketKey.split(";");
+    const marketType = keySegments[2]; // "m" | "ou" | "s"
+    const rawLine = keySegments.length >= 4 ? parseFloat(keySegments[3]) : NaN;
+    // Only treat the line as present when it parses to a finite number — a malformed marketKey
+    // must NOT silently send `points:null` (JSON coerces NaN to null) on a money-placing request.
+    const linePoints = Number.isFinite(rawLine) ? rawLine : undefined;
+
     // Step 1: Quote
     console.log(`[PIN] Quoting: matchup=${matchupId} market=${marketKey} side=${designation}`);
     const quoteResp = await this._apiRequest(`${API_BASE}/bets/straight/quote`, {
       method: "POST",
       body: {
         oddsFormat: "american",
-        selections: [{ matchupId, marketKey, designation, price: 0 }],
+        selections: [
+          {
+            matchupId,
+            marketKey,
+            designation,
+            price: 0,
+            ...(linePoints !== undefined ? { points: linePoints } : {}),
+          },
+        ],
       },
     });
     if (quoteResp.status !== 200) throw new Error(`quote failed (${quoteResp.status}): ${quoteResp.body}`);
@@ -194,6 +252,10 @@ class PinnacleAdapter {
     if (!sel) throw new Error("No selection in quote response");
     const marketId = sel.marketId;
     const price = sel.price;
+    // Alt lines carry a marketAltId (main lines return null); the place body must echo both
+    // `points` and `marketAltId` from the authoritative quote response for alt totals/spreads.
+    const placePoints = sel.points ?? linePoints;
+    const marketAltId = sel.marketAltId;
 
     const decimal = price > 0 ? 1 + price / 100 : 1 + 100 / Math.abs(price);
     console.log(`[PIN] Quote: marketId=${marketId} price=${price} (${decimal.toFixed(3)})`);
@@ -206,11 +268,22 @@ class PinnacleAdapter {
       body: {
         oddsFormat: "american",
         requestId,
+        acceptBetterPrices: true,
         acceptBetterPrice: true,
         class: "Straight",
-        selections: [{ marketId, matchupId, marketKey, designation, price }],
+        selections: [
+          {
+            marketId,
+            matchupId,
+            marketKey,
+            designation,
+            price,
+            ...(placePoints !== undefined && placePoints !== null ? { points: placePoints } : {}),
+            ...(marketAltId !== undefined && marketAltId !== null ? { marketAltId } : {}),
+          },
+        ],
         stake,
-        originTag: "sl:bsd",
+        originTag: marketType === "m" ? "sm:bsd" : "m:bsd",
       },
     });
     if (placeResp.status !== 200) throw new Error(`placeBet failed (${placeResp.status}): ${placeResp.body}`);

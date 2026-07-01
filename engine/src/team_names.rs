@@ -632,7 +632,7 @@ pub fn canonical_event_id(sport: &str, away: &str, home: &str, start_time: &str)
 pub fn normalize_selection(market_type: &str, raw: &str, sport: &str) -> String {
     let lower = raw.trim().to_lowercase();
     match market_type {
-        "total" | "team_total" => {
+        "total" | "team_total" | "player_prop" => {
             if lower.starts_with("over") || lower == "o" {
                 "over".to_string()
             } else if lower.starts_with("under") || lower == "u" {
@@ -681,26 +681,61 @@ fn extract_date(s: &str) -> Option<String> {
 
 /// Normalize a player name for cross-venue matching.
 /// "Luka Doncic" / "L. Doncic" / "Doncic, Luka" → "doncic"
+/// Fold a common Latin diacritic to its ASCII base so "garcía" matches "garcia" across books.
+fn fold_diacritic(c: char) -> char {
+    match c {
+        'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' => 'a',
+        'é' | 'è' | 'ê' | 'ë' => 'e',
+        'í' | 'ì' | 'î' | 'ï' => 'i',
+        'ó' | 'ò' | 'ô' | 'ö' | 'õ' => 'o',
+        'ú' | 'ù' | 'û' | 'ü' => 'u',
+        'ñ' => 'n',
+        'ç' => 'c',
+        'ý' | 'ÿ' => 'y',
+        other => other,
+    }
+}
+
+/// Normalize a player name for cross-book matching.
+///
+/// FAIL-CLOSED: must yield the SAME string for the same player across DraftKings, FanDuel, and
+/// Pinnacle, and DIFFERENT strings for different players. It keeps the FULL name — it must never
+/// collapse to last-name-only, which would collide distinct players who share a surname (e.g. the
+/// two NHL "Sebastian Aho"). A wrong collision stakes real money on a non-arb, so when in doubt the
+/// safe outcome is a non-match (missed arb), never a mis-match.
 pub fn normalize_player(raw: &str) -> String {
-    let cleaned = raw
-        .trim()
-        .to_lowercase()
-        .replace(".", "")
-        .replace("'", "")
-        .replace("'", "")
-        .replace("-", " ");
+    let mut s = raw.trim().to_string();
 
-    if cleaned.contains(',') {
-        let parts: Vec<&str> = cleaned.splitn(2, ',').collect();
-        return parts[0].trim().to_string();
+    // Drop a trailing "(TEAM)" disambiguator, e.g. "Sebastian Aho (CAR)". Team context is carried
+    // by the event/teams, not the name string.
+    if let Some(idx) = s.find('(') {
+        s.truncate(idx);
+    }
+    // "Last, First" → "First Last".
+    if let Some((last, first)) = s.split_once(',') {
+        s = format!("{} {}", first.trim(), last.trim());
     }
 
-    let words: Vec<&str> = cleaned.split_whitespace().collect();
-    if words.len() >= 2 {
-        return words[words.len() - 1].to_string();
+    // Lowercase, fold diacritics, drop intra-name punctuation (J.T. → jt, De'Aaron → deaaron),
+    // turn separators (hyphen/slash/space) into spaces.
+    let mut out = String::with_capacity(s.len());
+    for c in s.to_lowercase().chars().map(fold_diacritic) {
+        match c {
+            '.' | '\'' | '\u{2019}' | '`' => {} // remove intra-name punctuation
+            c if c.is_ascii_alphanumeric() => out.push(c),
+            _ => out.push(' '),
+        }
     }
 
-    cleaned
+    let mut tokens: Vec<&str> = out.split_whitespace().collect();
+    // Strip a trailing generational suffix (Jr/Sr/II/III/IV) — as a token, not by truncating words.
+    while matches!(
+        tokens.last().copied(),
+        Some("jr") | Some("sr") | Some("ii") | Some("iii") | Some("iv")
+    ) {
+        tokens.pop();
+    }
+    tokens.join(" ")
 }
 
 /// Extract prop type from market name.
@@ -776,6 +811,35 @@ pub fn parse_player_prop(market_name: &str) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_normalize_player_fail_closed() {
+        // Full name retained — never last-name-only.
+        assert_eq!(normalize_player("Trent Grisham"), "trent grisham");
+        // Generational suffix stripped as a token (must not become "jr").
+        assert_eq!(normalize_player("Fernando Tatis Jr."), "fernando tatis");
+        // Diacritics folded to ASCII.
+        assert_eq!(normalize_player("Adolis García"), "adolis garcia");
+        // Initials with dots collapse.
+        assert_eq!(normalize_player("J.T. Realmuto"), "jt realmuto");
+        // Apostrophe removed (so it also matches an apostrophe-free spelling).
+        assert_eq!(normalize_player("De'Aaron Fox"), "deaaron fox");
+        assert_eq!(
+            normalize_player("DeAaron Fox"),
+            normalize_player("De'Aaron Fox")
+        );
+        // Hyphen → space.
+        assert_eq!(normalize_player("Karl-Anthony Towns"), "karl anthony towns");
+        // "(TEAM)" disambiguator dropped.
+        assert_eq!(normalize_player("Sebastian Aho (CAR)"), "sebastian aho");
+        // FAIL-CLOSED: distinct players sharing a surname must NOT collide.
+        assert_ne!(
+            normalize_player("Bo Bichette"),
+            normalize_player("Dante Bichette")
+        );
+        // A bare surname must not match the full name.
+        assert_ne!(normalize_player("Aho"), normalize_player("Sebastian Aho"));
+    }
 
     #[test]
     fn test_normalize_nba() {

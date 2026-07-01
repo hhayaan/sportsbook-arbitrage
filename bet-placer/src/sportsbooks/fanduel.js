@@ -554,7 +554,7 @@ class FanDuelAdapter {
     console.log(`[FD] Selection ${runnerId} @ ${americanOdds} (${decimalOdds})`);
 
     console.log(`[FD] Validating bet (implyBets)...`);
-    const implyResult = await this.implyBets(marketId, runnerId);
+    const implyResult = await this.implyBets(marketId, runnerId, runner.handicap);
 
     if (implyResult.respCode !== "SUCCESS") {
       throw new Error(`implyBets failed: ${implyResult.respCode}`);
@@ -581,15 +581,22 @@ class FanDuelAdapter {
       fracDen = Math.round(Math.abs(implyAmerican));
     }
 
-    // Get the runner from implyBets (includes handicap when needed)
+    // Get the runner from implyBets for marketId/selectionId echo.
     const implyRunner = combo.legCombinations?.[0]?.runners?.[0] || {};
 
-    console.log(`[FD] implyBets odds: ${implyAmerican} (${trueDecimal}), frac: ${fracNum}/${fracDen}, handicap: ${implyRunner.handicap ?? "none"}`);
+    // Source the handicap from the getMarketPrices runner (line ~547), NOT from implyBets:
+    // betCombinations[].legCombinations[].runners[] never carries `handicap`, so
+    // implyRunner.handicap is always undefined and main run lines / totals / pitcher O/U
+    // would otherwise place at handicap 0 (wrong line or FD rejection). Alt lines and
+    // discrete "N+" props legitimately have handicap 0 (line is baked into the selectionId).
+    const handicap = runner.handicap;
+
+    console.log(`[FD] implyBets odds: ${implyAmerican} (${trueDecimal}), frac: ${fracNum}/${fracDen}, handicap: ${handicap ?? "none"}`);
     console.log(`[FD] Placing $${stake} bet...`);
     const placeResult = await this.placeBet({
       marketId: implyRunner.marketId || marketId,
       selectionId: implyRunner.selectionId || runnerId,
-      handicap: implyRunner.handicap,
+      handicap,
       stake,
       betReference,
       decimalOdds: trueDecimal,

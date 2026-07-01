@@ -65,13 +65,16 @@ FanDuel:
 - FanDuel soccer is fetched as one event type, then supported competitions are mapped to the same league namespaces used by DK/PIN: `MLS`, `EPL`, `LA_LIGA`, `SERIE_A`, `BUNDESLIGA`, `LIGUE_1`, and `UCL`.
 - Unsupported FD soccer competitions are skipped.
 - FanDuel authenticated session checks happen only during live validation/cashout.
+- With `EXPANDED_MARKET_SCAN` enabled, Rust fetches per-event `event-page` payloads for discovered events and parses HAR-backed two-way line markets plus over/under player props.
 
 Pinnacle:
 
 - Default source is authenticated: `PIN_ODDS_SOURCE=auth`.
 - Rust calls the bet-placer HTTP bridge at `PIN_AUTH_ODDS_BASE_URL`, default `http://127.0.0.1:3404`.
-- The bridge uses the logged-in Pinnacle browser session and authenticated Arcadia endpoints.
+- The bridge uses the logged-in Pinnacle browser session and authenticated Arcadia endpoints, including related matchups/markets when `PIN_SNAPSHOT_RELATED` is enabled.
 - Guest scan is opt-in with `PIN_ODDS_SOURCE=guest` or `PIN_ODDS_SOURCE=public`.
+
+DraftKings expanded scan uses the local DK proxy route `GET /dk-event/{eventId}/{subcategoryId}`. Expanded fanout is capped by `EXPANDED_MARKET_MAX_EVENTS_PER_SPORT`, default `8`.
 
 ## Normalization
 
@@ -87,6 +90,8 @@ The team pair is sorted. It is a cross-book identity key, not an away/home decla
 
 Period labels are normalized in the fetcher. Unsupported Pinnacle period numbers are skipped instead of silently becoming `full_game`, and non-full-game Pinnacle moneylines are dropped before detection.
 
+Expanded market identity includes `surface_key`, `player_name`, and `prop_type` where applicable. Player props are matched fail-closed: event, player, prop type, period, and line must all agree before two books can form a complementary pair.
+
 ## Detection
 
 `arb_detector::detect_arbs` groups the book by market identity and searches two complementary selections.
@@ -98,6 +103,8 @@ Current detection constraints:
 - soccer-style three-way moneylines are skipped;
 - partial-period moneylines are skipped;
 - totals require over vs under;
+- team totals use team-specific surface identity;
+- player props require over vs under and exact player/prop identity;
 - spreads require different selections and opposite line signs;
 - candidates must be fresh according to `MAX_DATA_AGE_MS`, currently `30000`.
 
@@ -136,16 +143,17 @@ Before an executor is called, the main loop:
 9. Skips pregame events farther than `MAX_HOURS_TO_START`, default 24 hours.
 10. Requires `settings.enabled`.
 11. In live mode, applies `LIVE_ALLOWED_PAIRS` if set; this is placement-only and does not affect scanning or `[ARB]` terminal output.
-12. Applies persistent family-scope dedup for actual live WebSocket execution.
-13. Calls paper or live execution.
+12. In live mode, applies `LIVE_ALLOWED_MARKET_TYPES`; default `moneyline,spread,total,team_total` keeps `player_prop` scan/paper only.
+13. Applies persistent family-scope dedup for actual live WebSocket execution.
+14. Calls paper or live execution.
 
 The family dedup key is:
 
 ```text
-sport + event_id + soft_venue + market_type + period
+sport + event_id + soft_venue + market_type + period + surface_key + player_name + prop_type
 ```
 
-The key is order-independent for Pinnacle/soft-book pairs and intentionally excludes line and side. A successful live fill records the family, starts a 30-second success cooldown by default, and allows up to 3 successful repeats after the first fill. Clear soft leg-1 limit/exposure or unavailable-market failures hard-lock the family for the 6-hour TTL. Generic `PurchaseNotAccepted`, slippage, stale IDs, auth/browser/network errors, insufficient funds, Pinnacle quote failures, and Pinnacle placement failures do not hard-lock the family. State is stored in `data/family-dedup.json` by default. Paper/scan runs do not write persistent family state.
+The key is order-independent for Pinnacle/soft-book pairs and intentionally excludes line and side. It includes surface/player/prop identity so unrelated props and team totals do not suppress each other. A successful live fill records the family, starts a 30-second success cooldown by default, and allows up to 3 successful repeats after the first fill. Clear soft leg-1 limit/exposure or unavailable-market failures hard-lock the family for the 6-hour TTL. Generic `PurchaseNotAccepted`, slippage, stale IDs, auth/browser/network errors, insufficient funds, Pinnacle quote failures, and Pinnacle placement failures do not hard-lock the family. State is stored in `data/family-dedup.json` by default. Paper/scan runs do not write persistent family state.
 
 ## Stake Sizing
 
@@ -275,6 +283,8 @@ The monitor:
 
 ## Current Work To Do
 
+- Run authenticated scan-only telemetry with `EXPANDED_MARKET_SCAN=1` and review DK/FD/PIN player-prop identity overlap.
+- Keep `player_prop` out of `LIVE_ALLOWED_MARKET_TYPES` until Pinnacle special quote/place and prop-aware recovery are implemented.
 - Decide whether true ladder buckets or an edge-improvement gate are needed after low-stake family-dedup testing.
 - Review FD/PIN detector telemetry before changing non-soccer normalization or adding FD authenticated scan overlay.
 - Keep adding replay fixtures for unsupported Pinnacle period handling so unknown periods cannot become full-game markets again.

@@ -102,6 +102,46 @@ $env:PIN_ODDS_SOURCE = "guest"
 
 Use guest mode only for diagnostics.
 
+## Expanded Markets Or Props Missing
+
+Current behavior:
+
+- `EXPANDED_MARKET_SCAN` is enabled by default.
+- DK props require the DK proxy route `/dk-event/{eventId}/{subcategoryId}`.
+- FD props require event-page payloads from discovered events.
+- PIN props require related matchups/markets from the authenticated snapshot bridge or guest related endpoints.
+
+Checks:
+
+- DK proxy is running on `3403`.
+- Bet placer is running on `3402` and Pinnacle auth odds bridge is running on `3404`.
+- Pinnacle browser is logged in.
+- `PIN_SNAPSHOT_RELATED` is unset or truthy.
+- `PIN_RELATED_MAX_MATCHUPS` and `EXPANDED_MARKET_MAX_EVENTS_PER_SPORT` are not set too low.
+- `DETECTOR_TELEMETRY=1` is enabled and `engine\data\events.jsonl` has `DETECTOR_MARKET_COUNTS`.
+
+Diagnostic run:
+
+```powershell
+cd C:\dev\sportsbook-arbitrage\engine
+$env:DETECTOR_TELEMETRY = "1"
+$env:EXPANDED_MARKET_SCAN = "1"
+$env:EXPANDED_MARKET_MAX_EVENTS_PER_SPORT = "8"
+cargo run --bin arb-engine
+```
+
+## Prop Candidate Prints But Does Not Place
+
+This is expected with the default live gate.
+
+Current behavior:
+
+- `LIVE_ALLOWED_MARKET_TYPES` defaults to `moneyline,spread,total,team_total`.
+- `player_prop` can scan, detect, and paper trade, but is skipped before live WebSocket execution by default.
+- Pinnacle special/player-prop IDs use the `SP:` prefix and are not yet wired to a live special-bet quote/place path.
+
+Do not add `player_prop` to `LIVE_ALLOWED_MARKET_TYPES` until Pinnacle special quote/place, soft-book prop validation, and prop-aware recovery are implemented.
+
 ## FanDuel Markets Fetch But No FD/PIN Arbs
 
 Current behavior:

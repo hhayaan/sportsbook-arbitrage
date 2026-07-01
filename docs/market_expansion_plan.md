@@ -1,475 +1,256 @@
 # Market Expansion Plan
 
-This file tracks the planned expansion from the current main market engine into additional market surfaces from `docs/market_expansion_report.md`. It is a planning and implementation tracker, similar in purpose to `docs/engine-merge-plan.md`.
+This file is the implementation tracker for expanding the terminal-first Rust engine beyond the original main-game markets. It should be read with `docs/market_expansion_report.md` for the strategic market research and `docs/HARs/PARTNER-HANDOFF_har-capture_2026-06-04.md` for the captured request evidence.
 
-The current project is still terminal-first and Rust-led. Expanded markets should be added deliberately, behind scan-only and live-placement gates, with parser fixtures and source evidence before any live betting.
+Last updated: 2026-07-01.
 
-## Current Position
+## Current State
 
-The engine currently scans and executes a narrow set of canonical two-outcome markets:
+The engine now has two scan layers:
 
-- Moneyline.
-- Spread.
-- Total.
-- Limited team-total plumbing, but team totals are not a planned live expansion surface yet.
+- The original hot path for league-level game markets: moneyline, spread, total, and team total.
+- A HAR-backed expanded scan path for per-event and related markets from DraftKings, FanDuel, and Pinnacle.
 
-The current live execution path remains Pinnacle-led:
+The expanded scan path is enabled by default with `EXPANDED_MARKET_SCAN=1` and is capped by `EXPANDED_MARKET_MAX_EVENTS_PER_SPORT`, default `8`, so the main polling loop does not fan out across every event on every cycle.
 
-- Candidate detection requires one Pinnacle leg.
-- Authenticated Pinnacle odds are the default scan source.
-- Pinnacle executable quote is treated as hedge truth.
-- The soft book is validated before risk.
-- The soft book is placed first, then Pinnacle is used as the hedge.
-
-Important current limitations:
-
-- There is no dedicated `surface_key` yet.
-- `market_type=total` is too broad for expanded markets.
-- `CanonicalMarket` has `player_name` and `prop_type`, but the detector, verifier, execution path, DB, telemetry, and family dedup are still effectively built around `event_id`, `market_type`, `line`, and `period`.
-- FanDuel line placement has a known baseline risk: `executeBet()` currently calls `implyBets(marketId, runnerId)` without passing the runner handicap. This must be fixed before expanding FanDuel line markets.
-- There is no raw response fixture harness for expanded parser work.
-- There is no `LIVE_ALLOWED_SURFACES` gate yet.
-
-## Guardrails
-
-- Keep engine logic in Rust.
-- Keep browser/session/API automation in `bet-placer` as the adapter bridge.
-- Keep the operator surface terminal-first with JSONL telemetry.
-- Do not port a GUI or frontend for market expansion.
-- Do not enable live placement for a new surface until scan-only behavior is proven.
-- Keep Pinnacle mandatory for expanded live markets unless we explicitly decide otherwise later.
-- Do not add fuzzy parser matching for new markets. Use explicit allowlisted mappings per book and surface.
-- Do not treat public market existence as production readiness. Each surface must pass Ontario availability, API addressability, settlement compatibility, and executable economics checks.
-- Do not add player props until stat-source and correction-window rules are mapped.
-
-## Current Work
-
-### HAR Collection
-
-Status: in progress.
-
-Purpose:
-
-- Capture real logged-in Ontario request shapes before parser or placement changes.
-- Confirm market IDs, selection IDs, line/handicap fields, runner fields, quote responses, max stake fields, and error behavior.
-- Provide fixtures for parser tests and adapter tests.
-
-Current requested HAR set:
-
-| File name | Book | Surface | Needed calls | Placement? |
-| --- | --- | --- | --- | --- |
-| `fd_baseline_spread.har` | FanDuel | Normal spread | `getMarketPrices`, `implyBets` | No submit |
-| `fd_baseline_total.har` | FanDuel | Normal total | `getMarketPrices`, `implyBets` | No submit |
-| `dk_mlb_1st_inning_total.har` | DraftKings | MLB first-inning total / NRFI-style | `selectioninfo`, `calculateBets` | No submit |
-| `fd_mlb_1st_inning_total.har` | FanDuel | MLB first-inning total / NRFI-style | `getMarketPrices`, `implyBets` | No submit |
-| `pin_mlb_1st_inning_total.har` | Pinnacle | MLB first-inning total / NRFI-style | Arcadia `matchups`, `markets/straight`, `/bets/straight/quote` | No submit |
-| `dk_soccer_corners.har` | DraftKings | Soccer corners | `selectioninfo`, `calculateBets` | No submit |
-| `fd_soccer_corners.har` | FanDuel | Soccer corners | `getMarketPrices`, `implyBets` | No submit |
-| `pin_soccer_corners.har` | Pinnacle | Soccer corners | Arcadia `matchups`, `markets/straight`, `/bets/straight/quote` | No submit |
-
-Collection notes:
-
-- Use logged-in Ontario sessions.
-- Preserve DevTools Network log.
-- Reload the event page after preserve-log is enabled.
-- Expand the target market.
-- Click one selection into the betslip.
-- Enter a tiny stake or stop immediately before final submit.
-- Trigger quote/validation only.
-- Do not place a bet.
-- HAR files can contain cookies, auth headers, geolocation tokens, and session data. Keep them local and do not publish them.
-
-## Next Work After HAR Collection
-
-### 1. Sanitize And Inventory HARs
-
-Goal:
-
-- Extract only the fields needed for parser and adapter implementation.
-- Remove cookies, auth tokens, account IDs, geolocation payloads, and unrelated traffic.
-
-Deliverables:
-
-- Sanitized request/response fixtures under an agreed fixture directory.
-- A short field inventory per book and surface.
-- A note for each captured market saying whether the surface appears Ontario-tradable and quote-addressable.
-
-Recommended fixture structure:
+Live execution is still conservative. `LIVE_ALLOWED_MARKET_TYPES` defaults to:
 
 ```text
-engine/fixtures/
-  fanduel/
-    baseline_spread_getMarketPrices.json
-    baseline_spread_implyBets.json
-    baseline_total_getMarketPrices.json
-    baseline_total_implyBets.json
-    mlb_first_inning_total_getMarketPrices.json
-    mlb_first_inning_total_implyBets.json
-    soccer_corners_getMarketPrices.json
-    soccer_corners_implyBets.json
-  draftkings/
-    mlb_first_inning_total_selectioninfo.json
-    mlb_first_inning_total_calculateBets.json
-    soccer_corners_selectioninfo.json
-    soccer_corners_calculateBets.json
-  pinnacle/
-    mlb_first_inning_total_matchups.json
-    mlb_first_inning_total_markets_straight.json
-    mlb_first_inning_total_quote.json
-    soccer_corners_matchups.json
-    soccer_corners_markets_straight.json
-    soccer_corners_quote.json
+moneyline,spread,total,team_total
 ```
 
-### 2. Fix FanDuel Handicap Propagation
+That means player props can be scanned, detected, printed, and paper-tested, but `player_prop` candidates are skipped in live mode unless the operator explicitly opts in. Do not opt in to live player props until the prop placement work below is complete.
 
-Why this comes first:
+## Implemented On 2026-07-01
 
-- FanDuel spreads, totals, alternate lines, corners, and many line markets can require an exact runner handicap.
-- The current placement flow gets the runner and its `handicap`, but the validation call does not pass it into `implyBets`.
-- If `implyBets` receives the wrong handicap, FanDuel can reject with errors such as requested handicap unavailable.
+### Canonical Identity
 
-Implementation recommendation:
+`CanonicalMarket` now carries `surface_key`, and the identity/dedup path carries the extra dimensions needed for expanded markets:
 
-- Pass `runner.handicap` from `executeBet()` into `implyBets(marketId, runnerId, runner.handicap)`.
-- Preserve the existing behavior of using the `implyBets` runner returned by FanDuel for final `placeBet`.
-- Add adapter tests or fixture-backed checks using the baseline FD spread and total HARs.
+- `MarketIdentityKey` includes `surface_key`.
+- `PriceEntry` carries `surface_key`, `player_name`, and `prop_type`.
+- `ArbCandidate` carries `surface_key`, `player_name`, and `prop_type`.
+- Family dedup includes surface, player, and prop type so unrelated props or team totals cannot suppress each other.
+- `team_names::normalize_selection` treats `player_prop` as an over/under market.
 
-Acceptance criteria:
-
-- Normal FD spread validation includes the correct handicap.
-- Normal FD total validation includes the correct handicap when present.
-- Existing FD moneyline behavior is unchanged.
-
-### 3. Add Canonical Surface Framework
-
-Goal:
-
-- Prevent collisions between markets that currently look like the same `market_type`, `line`, and `period` but are actually different things.
-
-Problem examples:
-
-- Soccer full-game goals total and soccer corners total are both totals.
-- Soccer cards total and soccer corners total are both totals, but have different settlement units.
-- MLB full-game total and MLB first-inning total are both totals, but use different periods and settlement windows.
-- Player strikeouts over/under and game total over/under are both over/under structures, but one is a player stat and one is a game score.
-
-Recommended model:
-
-- Add `surface_key` to `CanonicalMarket`.
-- Carry `surface_key` into `MarketIdentityKey`, `PriceEntry`, `ArbCandidate`, detector telemetry, verifier reconstruction, family dedup, and DB/API rows where needed.
-- Keep `market_type` as the bet shape: `moneyline`, `spread`, `total`, `team_total`, `player_prop`, `alt_spread`, `alt_total`, or other explicit shape.
-- Use `surface_key` as the thing being measured: examples include `game`, `first_inning_runs`, `soccer_corners`, `soccer_cards`, `golf_matchup`, `ufc_goes_distance`, `f1_driver_matchup`, `player_strikeouts`.
-
-Example:
+Default game markets can leave `surface_key` empty. Expanded surfaces set explicit keys, for example:
 
 ```text
-market_type = total
-surface_key = soccer_corners
-period = full_game
-line = 9.5
-selection = over
+player:assists:jalen brunson:full_game
+team_total:toronto blue jays
 ```
 
-Acceptance criteria:
+### DraftKings Expanded Scan
 
-- Existing moneyline/spread/total behavior defaults to `surface_key=game`.
-- Existing tests still pass.
-- Soccer corners cannot group with soccer goals totals.
-- Future player props cannot group with team/game totals.
-- Family dedup keys include surface identity.
-- Detector telemetry and attempt telemetry include surface identity.
+The DK proxy now exposes:
 
-### 4. Add Scan And Live Surface Gates
+```text
+GET /dk-event/{eventId}/{subcategoryId}
+```
 
-Goal:
+Rust uses that route to call the HAR-observed DraftKings event-subcategory endpoint:
 
-- Allow us to observe expanded markets without risking live placement.
+```text
+/sites/CA-ON-SB/api/sportscontent/controldata/event/eventSubcategory/v1/markets
+```
 
-Recommended env vars:
+The scanner collects event IDs from the league feed, then fetches HAR-backed subcategory IDs seen in the collected MLB, NBA, and NHL captures. It emits:
 
-- `SCAN_ALLOWED_SURFACES`: optional scan allowlist. Defaults to current approved surfaces only until expansion begins.
-- `LIVE_ALLOWED_SURFACES`: optional live placement allowlist. Defaults to `game` only.
+- Two-sided player prop over/under markets when player, prop type, line, and both sides are structurally available.
+- Main and alternate totals/spreads when the event-subcategory payload has a normal two-way line shape.
+- Team totals with a team-specific `surface_key`.
 
-Recommended behavior:
+It intentionally skips one-sided milestones, bands, exact outcomes, race-to markets, and parlay/combo markets because the current detector only supports two-leg complementary arbs.
 
-- Scanning can include new surfaces only when explicitly enabled.
-- Terminal output should include surface when it is not `game`.
-- Live execution should refuse a candidate whose surface is not allowed, even if the venue pair is allowed.
-- `LIVE_ALLOWED_PAIRS` should remain independent of surface gating.
+### FanDuel Expanded Scan
 
-Acceptance criteria:
+The FanDuel scanner now fetches per-event `event-page` payloads after the league/page fetch discovers event IDs. It emits:
 
-- We can scan MLB first-inning markets without placing them.
-- We can scan soccer corners without placing them.
-- Existing main-market live mode remains unchanged when no new env vars are set.
+- Two-sided player prop over/under markets.
+- Alternate player prop ladders where the line can be read from handicap or runner text.
+- Game totals, spreads, and team totals when the event-page payload has a normal two-way line shape.
 
-### 5. Add Fixture-Backed Parser Tests
+FanDuel does not expose a portable player ID in these HARs, so cross-book player matching is fail-closed on normalized full player name, event, prop type, line, and period.
 
-Goal:
+### Pinnacle Expanded Scan
 
-- Make parser expansion repeatable and auditable.
+The authenticated Pinnacle bridge now includes related data in league snapshots:
 
-For each new surface and book, tests should confirm:
+- `related_matchups`
+- `related_markets`
 
-- Correct `event_id`.
-- Correct `sport` and `league`.
-- Correct `market_type`.
-- Correct `surface_key`.
-- Correct `period`.
-- Correct `selection`.
-- Correct `line`.
-- Correct venue market ID.
-- Correct exclusion of unsupported or ambiguous market variants.
+This is controlled by:
 
-Acceptance criteria:
+```text
+PIN_SNAPSHOT_RELATED=1
+PIN_RELATED_MAX_MATCHUPS=8
+```
 
-- The first expanded surface has DK, FD, and Pinnacle parser fixture tests.
-- Tests prove that expanded surface markets do not collide with existing game markets.
+Guest scan mode also fetches related matchups and related straight markets when explicitly selected with `PIN_ODDS_SOURCE=guest` or `PIN_ODDS_SOURCE=public`.
 
-## First Planned Surface: MLB First-Inning Total / NRFI-Style Markets
+The Rust scanner parses Pinnacle player-prop specials from the related-market payloads and emits two-sided over/under `player_prop` markets when the special has enough structure. Pinnacle special markets use a guarded venue-market-id grammar:
 
-Status: planned after HAR collection and baseline infrastructure.
+```text
+SP:{specialMatchupId}:{marketKey}:{participantId}
+```
 
-Why it is first:
+The `SP:` prefix is intentional. It prevents the existing straight-bet adapter from accidentally treating a special/player-prop market as a normal straight market.
 
-- It is closest to the existing period plus total/binary model.
-- It exercises period identity without immediately requiring player/stat-source plumbing.
-- It is a good spike for the `surface_key` framework.
+### Live Gate
 
-Likely surface mapping:
+The main loop now applies `LIVE_ALLOWED_MARKET_TYPES` before live WebSocket execution. This gate is separate from `LIVE_ALLOWED_PAIRS`.
 
-| Concept | Proposed value |
-| --- | --- |
-| `market_type` | `total` or explicit binary type if book exposes NRFI/YRFI differently |
-| `surface_key` | `first_inning_runs` |
-| `period` | `first_inning` |
-| selections | `over` / `under`, or normalized `yes` / `no` only if all books expose a binary no-run market safely |
+Examples:
 
-Important safety question:
+```powershell
+$env:LIVE_ALLOWED_MARKET_TYPES = "moneyline,spread,total,team_total"
+$env:LIVE_ALLOWED_PAIRS = "fanduel/pinnacle"
+```
 
-- If one book exposes NRFI/YRFI and another exposes first-inning total 0.5, we need to confirm they are exactly equivalent under settlement rules before matching them.
+With the defaults, player props remain scan/paper only. When a live candidate is skipped by this gate, telemetry emits `LIVE_MARKET_TYPE_SKIPPED`.
 
-Implementation steps:
+## HAR Coverage
 
-1. Use HARs to identify book-specific market names, IDs, periods, and line semantics.
-2. Add parser mappings behind scan-only gating.
-3. Add fixtures and parser tests.
-4. Add detector snapshot telemetry for near misses.
-5. Run scan-only and measure frequency, quote survival, and min-edge survival.
-6. Only then consider live placement with `$5` soft cap.
+Current HAR files under `docs/HARs` cover:
 
-## Second Planned Surface: Soccer Corners
+| File | Book | Coverage now used by scanner |
+| --- | --- | --- |
+| `dk_mlb_all-markets_padres-at-phillies_placed-then-cashedout_redacted.har` | DK | MLB per-event categories, game lines, inning menus, player props, team totals where two-way |
+| `fd_mlb_all-markets_padres-at-phillies_placed-then-cashedout_redacted.har` | FD | MLB event-page markets, game lines, inning menus, player props, team totals where two-way |
+| `pin_mlb_straight-ml-total-period_padres-phillies_redacted.har` | PIN | MLB straight full-game and period markets; confirms `s;1` is first five innings, not first inning |
+| `pin_player-prop-special-submit_redacted.har` | PIN | Player-prop special market grammar and related-market structure |
+| `dk_nba-nhl_player-props_placed-then-cashedout_redacted.har` | DK | NBA/NHL player-prop event subcategories |
+| `fd_nba-nhl_props-and-sog_placed_redacted.har` | FD | NBA/NHL event-page props, SOG-style markets, and alternate prop ladders |
 
-Status: planned after `surface_key` exists and first surface spike proves the framework.
+The scanner does not yet have HAR-backed implementations for soccer corners, golf matchups, F1 markets, or UFC goes-distance because those HARs are not in the current folder.
 
-Why it is second:
+## Strategic Correction: MLB First Inning And NRFI
 
-- The expansion report rates soccer corners as one of the clearest surfaces.
-- Corner settlement is more comparable across books than cards or player props.
-- It gives the engine a non-score total surface that tests the value of `surface_key`.
+The original report treated MLB first-inning/NRFI as a likely early surface. The HARs changed that conclusion.
 
-Likely surface mapping:
+DraftKings and FanDuel expose true first-inning total or NRFI-style markets. Pinnacle's MLB period `s;1` in the collected straight-market HAR is first five innings, with lines such as 3.5 and 4.5. It is not first inning.
 
-| Concept | Proposed value |
-| --- | --- |
-| `market_type` | `total` or `spread`, depending on book market |
-| `surface_key` | `soccer_corners` |
-| `period` | `full_game`, `first_half`, or explicit period from book |
-| selections | `over` / `under` for totals; team selections for corner handicaps |
+Because current live execution requires one Pinnacle leg, true first-inning/NRFI is not a live arb surface right now. It can remain a scan-only DK/FD research surface, but it should not be treated as a Pinnacle-backed live expansion target unless a true Pinnacle first-inning market is captured later.
 
-Implementation steps:
+## Current Market Readiness
 
-1. Use HARs to identify DK/FD/PIN corner market names and IDs.
-2. Confirm corners are corners taken, not awarded, across books.
-3. Add explicit parser mappings for corner totals only first.
-4. Leave corner handicaps out until totals are proven.
-5. Run scan-only before any live execution.
-
-## Later Candidate Surfaces
-
-### Golf Head-To-Head Matchups
-
-Status: not immediately planned.
-
-Why it is attractive:
-
-- Slower market movement than live team sports.
-- Public evidence suggests mature matchup rules.
-
-Why it is not first:
-
-- Requires stronger event identity for individual players.
-- Requires withdrawal, cut, tie, and reduced-round rule handling.
-- May need settlement ingest before meaningful production use.
-
-Next required evidence:
-
-- HARs for DK, FD, and Pinnacle golf matchups.
-- Three-book settlement matrix for withdrawal, tie, cut, and reduced-round treatment.
-
-### F1 / Motorsport Binary Markets
-
-Status: not immediately planned.
-
-Why it is attractive:
-
-- Market existence appears real across the books.
-
-Why it is delayed:
-
-- DNF, classification, sprint/race distinction, qualifying, and top-finish settlement rules need a full rule diff.
-
-Next required evidence:
-
-- HARs for driver matchup and top-finish markets.
-- Three-book settlement matrix for classified finish, DNF, DNS, sprint, qualifying, and shortened race handling.
-
-### UFC Goes Distance
-
-Status: not immediately planned.
-
-Why it is attractive:
-
-- Two-outcome structure is simple.
-
-Why it is delayed:
-
-- Technical decision, doctor stoppage, DQ, no-contest, cancellation, and changed-round-count rules can diverge across books.
-
-Next required evidence:
-
-- HARs for goes-distance markets.
-- Three-book settlement matrix before parser work.
-
-### Mainstream Player Props
-
-Status: roadmap only.
-
-Why it is attractive:
-
-- Large market menu.
-
-Why it is delayed:
-
-- Requires player identity, stat-source identity, correction-window policy, starter/participation rules, overtime rules, void rules, and settlement reconciliation.
-
-Required framework before starting:
-
-- `surface_key`.
-- Strong `player_key`.
-- Stat-source and correction-window matrix.
-- Fixture harness.
-- Settlement ingest decision.
-
-### FanDuel Basketball Alternate Spreads
-
-Status: roadmap only, after FD handicap flow is proven.
-
-Why it is delayed:
-
-- Alt spreads may be more fragile in the FD UI/API path.
-- FanDuel may treat many alts as parlay-oriented surfaces.
-- Current DK and Pinnacle scanners intentionally skip many alternate lines.
-
-Next required evidence:
-
-- FD NBA alt-spread HAR with `getMarketPrices` and `implyBets`.
-- Confirmation that the market can be straight-bet validated and placed.
-- Explicit decision about whether to add ladder/alt-line dedup before live use.
-
-### Cards, Player Soccer Stats, Tennis, Esports, And Long-Tail Two-Way Surfaces
-
-Status: not planned.
-
-Why:
-
-- These are too broad to implement as one bucket.
-- Each needs its own settlement, identity, parser, and economics evaluation.
-
-## Surface Readiness Matrix
-
-| Surface | Market existence | Ontario/API evidence | Settlement confidence | Engine readiness | Current decision |
-| --- | --- | --- | --- | --- | --- |
-| Current game moneyline/spread/total | Proven in engine | Proven enough for current live testing | Known enough for current scope | Live | Keep |
-| MLB first-inning total / NRFI-style | Likely | HARs pending | Needs rule confirmation | Needs `surface_key` and parser work | First spike |
-| Soccer corners totals | Likely | HARs pending | Promising, needs confirmation | Needs `surface_key` and parser work | Second spike |
-| Golf matchups | Likely | HARs not requested yet | Needs full matrix | Needs player matchup identity | Later |
-| F1 / motorsport binaries | Likely | HARs not requested yet | Needs full matrix | Needs participant/race identity | Later |
-| UFC goes distance | Likely | HARs not requested yet | Needs full matrix | Needs explicit binary surface | Later |
-| Player props | Real but broad | HARs not requested yet | Needs stat-source matrix | Not ready | Roadmap |
-| FD basketball alts | Real but execution uncertain | HARs not requested yet | Similar to spreads but API risk remains | FD handicap fix first | Roadmap |
+| Surface | Scan status | Live placement status | Notes |
+| --- | --- | --- | --- |
+| Game moneyline | Existing | Enabled by default | Pinnacle leg required for live |
+| Game spread | Existing | Enabled by default | FD handicap and PIN points paths fixed on 2026-06-25 |
+| Game total | Existing | Enabled by default | PIN alt totals supported through straight quote path |
+| Team total | Expanded identity in place | Enabled by default, still needs cautious live probes | Uses team-specific `surface_key` |
+| DK player props | Implemented for HAR-backed two-way O/U props | Disabled by default | Per-event subcategory fetch |
+| FD player props and SOG-style props | Implemented for HAR-backed two-way O/U props | Disabled by default | Event-page fetch; name-only player identity |
+| PIN player-prop specials | Implemented for scan/detect/paper | Disabled by default | `SP:` IDs intentionally block straight placement |
+| MLB true first inning / NRFI | DK/FD scan research only | Not viable live with current PIN coverage | PIN HAR showed F5, not first inning |
+| Soccer corners | Not implemented | Not implemented | Need DK/FD/PIN HARs |
+| Golf matchups | Not implemented | Not implemented | Need HARs plus settlement matrix |
+| F1 / motorsport | Not implemented | Not implemented | Need HARs plus DNF/classification rules |
+| UFC goes distance | Not implemented | Not implemented | Need HARs plus full rule diff |
+
+## Required Before Live Player Props
+
+Player props are not live-ready. The next implementation phase should add:
+
+1. Pinnacle special quote and placement support, likely through `/bets/special` rather than the existing straight path.
+2. WebSocket command typing so Rust can tell Node whether a Pinnacle leg is straight or special.
+3. Recovery support for half-filled prop arbs, including special-market rescue behavior.
+4. Soft-book validation checks for DK/FD props using the captured `calculateBets` and `implyBets` paths.
+5. Fixture-backed adapter tests for at least one DK prop, one FD prop, and one PIN special.
+6. A settlement/correction matrix per prop family before broad live use.
+
+Until that work is done, keep `player_prop` out of `LIVE_ALLOWED_MARKET_TYPES`.
+
+## Scan-Only Validation Plan
+
+The immediate next goal is a scan-only run using the collected HAR-backed scanner paths:
+
+```powershell
+$env:DETECTOR_TELEMETRY = "1"
+$env:EXPANDED_MARKET_SCAN = "1"
+$env:EXPANDED_MARKET_MAX_EVENTS_PER_SPORT = "8"
+cargo run --manifest-path engine\Cargo.toml
+```
+
+Review:
+
+- `engine\data\events.jsonl`
+- Terminal `[ARB]` output
+- `DETECTOR_MARKET_COUNTS`
+- `DETECTOR_FUNNEL_SUMMARY`
+- `DETECTOR_PIN_PAIR_SNAPSHOT`
+- `DETECTOR_CANDIDATE`
+- `MIN_EDGE_SKIPPED`
+- `LIVE_MARKET_TYPE_SKIPPED`
+
+The first pass should answer:
+
+- Are DK, FD, and PIN emitting the expected number of prop markets?
+- Are player prop identities aligning only when event, player, prop type, period, and line match?
+- Are any valid-looking candidates suppressed by family dedup?
+- Are any markets incorrectly grouped with game totals or team totals?
+- How much poll-cycle latency does the expanded fetch add?
 
 ## Economics And Telemetry Requirements
 
-Before live-enabling a new surface, scan-only runs should measure:
+Before any expanded live surface is enabled, scan-only and paper runs should measure:
 
-- Number of markets fetched by book.
-- Number of shared identity keys.
-- Number of complementary pairs.
-- Candidate count before min-edge.
-- Candidate count after min-edge.
+- Markets fetched by book, sport, market type, period, and surface.
+- Shared identity keys by venue pair.
+- Complementary pair count.
+- Candidate count before and after `MIN_ARB_PCT`.
 - Pinnacle quote survival rate.
 - Soft validation survival rate.
-- Average and max quoted Pinnacle stake.
-- Soft-book max or rejection behavior.
+- Average and max quoted stake.
 - Family dedup impact.
-- Latency from poll start to candidate execution decision.
-
-Recommended telemetry additions:
-
-- Include `surface_key` in detector diagnostics.
-- Include `surface_key` in `ARB_CANDIDATE`, `MIN_EDGE_SKIPPED`, `FIRE_ENTER`, and live attempt events.
-- Include surface in terminal `[ARB]` output when non-default.
+- Poll-start to live-decision latency.
+- Rejection reasons by market type.
 
 ## Open Decisions
 
 | Decision | Current recommendation |
 | --- | --- |
-| Keep Pinnacle mandatory for expanded live markets? | Yes. |
-| First implementation surface? | MLB first-inning total / NRFI-style. |
-| First larger production expansion surface? | Soccer corners. |
-| Initial live stake cap for expanded surfaces? | Keep `$5` soft cap. |
-| Add settlement ingest before props? | Yes, or at least decide the correction-window policy first. |
-| Add settlement ingest before golf top-finish? | Recommended before top-finish, less urgent for simple matchup scan-only. |
-| Use guest Pinnacle odds for expansion? | No; keep authenticated Pinnacle scan as default. |
-| Allow expanded markets live immediately after parser support? | No; scan-only first. |
+| Keep Pinnacle mandatory for expanded live markets? | Yes. The runtime still assumes Pinnacle as hedge truth. |
+| First live expansion beyond main game markets? | Full-game spreads/totals first; they are already closest to production. |
+| First scan-only expansion using current HARs? | Player-prop O/U across DK, FD, and PIN. |
+| First-inning/NRFI as live target? | No, not without a true Pinnacle first-inning capture. |
+| Soccer corners next? | Yes, but only after DK/FD/PIN HARs are captured. |
+| Allow expanded markets live immediately after parser support? | No. Use scan-only, then paper, then controlled tiny live probes. |
+| Add settlement ingest before props? | At minimum, define a correction-window and governing-stat policy before broad live use. |
 
 ## Working Checklist
 
-Current:
+Done:
 
-- [ ] Collect requested HARs.
-- [ ] Store HARs locally and keep raw files private.
-- [ ] Review HARs for requested endpoints and field coverage.
+- [x] Read and inventory collected HARs.
+- [x] Add canonical `surface_key` to market identity.
+- [x] Carry player/prop identity into candidate and dedup paths.
+- [x] Add DK per-event event-subcategory scanner path.
+- [x] Add FD per-event event-page scanner path.
+- [x] Add PIN related/special scanner path.
+- [x] Add live market-type gate with `LIVE_ALLOWED_MARKET_TYPES`.
+- [x] Add parser tests for DK event-subcategory props, FD event-page props, and PIN related specials.
+- [x] Keep `player_prop` out of default live placement.
 
 Next:
 
-- [ ] Sanitize HAR-derived fixtures.
-- [ ] Fix FanDuel handicap propagation.
-- [ ] Add `surface_key` to canonical market identity.
-- [ ] Add `LIVE_ALLOWED_SURFACES` scan/live gating.
-- [ ] Add fixture-backed parser tests.
-- [ ] Implement MLB first-inning total / NRFI-style scan-only parsing.
-- [ ] Run scan-only telemetry and review whether candidates are real.
+- [ ] Run authenticated scan-only telemetry with `EXPANDED_MARKET_SCAN=1`.
+- [ ] Compare market counts and identity overlap across DK/FD/PIN.
+- [ ] Investigate any detector near-misses or unexpected family-dedup skips.
+- [ ] Add sanitized fixtures for the specific HAR-derived payloads if we want replay tests beyond embedded parser-unit examples.
+- [ ] Implement Pinnacle special quote/place support.
+- [ ] Implement prop-aware soft validation and recovery.
+- [ ] Capture soccer-corners HARs for DK, FD, and Pinnacle if soccer corners remain the next non-prop target.
 
-Later:
+## Definition Of Done For This Phase
 
-- [ ] Implement soccer corners scan-only parsing.
-- [ ] Build settlement rule matrix for golf, F1, UFC, cards, and props.
-- [ ] Decide settlement ingest requirements.
-- [ ] Add player/stat identity framework if props become active.
-- [ ] Evaluate FD basketball alts after FD handicap path is proven.
+This HAR-backed scan phase is done when:
 
-## Definition Of Done For First Expansion Phase
-
-The first expansion phase is done when:
-
-- FD handicap propagation is fixed and verified.
-- `surface_key` exists end-to-end for scan/detect/verify/telemetry/family dedup.
-- `LIVE_ALLOWED_SURFACES` or equivalent prevents accidental live placement.
-- MLB first-inning total / NRFI-style markets can be parsed from DK, FD, and Pinnacle fixtures.
-- The engine can run scan-only with the new surface enabled.
-- Terminal and JSONL telemetry clearly explain why candidates did or did not progress.
-- No expanded surface is live-enabled by default.
-
+- [x] DK, FD, and PIN can emit expanded two-way O/U prop markets from the collected request shapes.
+- [x] Expanded markets have stable canonical identity and do not collide with main game markets.
+- [x] Live mode skips prop candidates by default.
+- [x] Rust tests and Node syntax checks pass.
+- [ ] One authenticated scan-only session confirms the expanded scanner works against live logged-in sessions.
+- [ ] Telemetry shows whether any real cross-book prop arbs or near misses survive normalization.
+- [ ] The next live-placement phase has fixture-backed quote/place support for Pinnacle specials and DK/FD prop validation.

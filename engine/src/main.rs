@@ -113,6 +113,21 @@ fn live_pair_allowed(pairs: &Option<BTreeSet<String>>, pair: &str) -> bool {
         .map_or(true, |allowed| allowed.contains(pair))
 }
 
+fn live_allowed_market_types_from_env() -> BTreeSet<String> {
+    let raw = std::env::var("LIVE_ALLOWED_MARKET_TYPES")
+        .unwrap_or_else(|_| "moneyline,spread,total,team_total".to_string());
+    raw.split([',', ';'])
+        .map(|token| token.trim().to_ascii_lowercase())
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn live_market_type_allowed(allowed: &BTreeSet<String>, market_type: &str) -> bool {
+    allowed.contains("*")
+        || allowed.contains("all")
+        || allowed.contains(&market_type.to_ascii_lowercase())
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt().with_env_filter("info").init();
@@ -188,12 +203,18 @@ async fn main() {
     let dk_proxy_base_url = odds_fetcher::draftkings_proxy_base_url();
     let live_allowed_pairs = live_allowed_pairs_from_env();
     let live_allowed_pairs_label = live_allowed_pairs_label(&live_allowed_pairs);
+    let live_allowed_market_types = live_allowed_market_types_from_env();
+    let live_allowed_market_types_label = live_allowed_market_types
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(",");
 
     tracing::info!(
-        "Settings: enabled={} stake_mode={} fixed_stake=${:.2} max_stake=${:.2} min_arb_pct={:.1}% max_hours={} skip_live={} pin_odds_source={} live_allowed_pairs={} family_dedup_ttl={}s FAMILY_DEDUP_SUCCESS_COOLDOWN_SECS={} FAMILY_DEDUP_SUCCESS_MAX_REPEATS={}",
+        "Settings: enabled={} stake_mode={} fixed_stake=${:.2} max_stake=${:.2} min_arb_pct={:.1}% max_hours={} skip_live={} pin_odds_source={} live_allowed_pairs={} live_allowed_market_types={} family_dedup_ttl={}s FAMILY_DEDUP_SUCCESS_COOLDOWN_SECS={} FAMILY_DEDUP_SUCCESS_MAX_REPEATS={}",
         settings_overrides.enabled, settings_overrides.stake_mode,
         settings_overrides.fixed_stake, settings_overrides.max_stake, settings_overrides.min_arb_pct,
-        max_hours_to_start, skip_live, pin_odds_source, live_allowed_pairs_label,
+        max_hours_to_start, skip_live, pin_odds_source, live_allowed_pairs_label, live_allowed_market_types_label,
         family_dedup::FamilyDedup::ttl_secs_from_env(),
         family_dedup::FamilyDedup::success_cooldown_secs_from_env(),
         family_dedup::FamilyDedup::success_max_repeats_from_env()
@@ -523,6 +544,34 @@ async fn main() {
                         if !bettable.contains(&candidate.leg1_venue.as_str())
                             || !bettable.contains(&candidate.leg2_venue.as_str())
                         {
+                            continue;
+                        }
+
+                        if !live_market_type_allowed(
+                            &live_allowed_market_types,
+                            &candidate.market_type,
+                        ) {
+                            tracing::info!(
+                                "[LIVE MARKET SKIP] {} not in LIVE_ALLOWED_MARKET_TYPES={} | {} {} {}",
+                                candidate.market_type,
+                                live_allowed_market_types_label,
+                                candidate.sport,
+                                candidate.period,
+                                candidate.event_id
+                            );
+                            if detector_telemetry_enabled {
+                                let _ = attempt_telemetry::emit_event(
+                                    "LIVE_MARKET_TYPE_SKIPPED",
+                                    None,
+                                    json!({
+                                        "event_id": candidate.event_id.clone(),
+                                        "sport": candidate.sport.clone(),
+                                        "market_type": candidate.market_type.clone(),
+                                        "period": candidate.period.clone(),
+                                        "allowed_market_types": live_allowed_market_types_label.clone(),
+                                    }),
+                                );
+                            }
                             continue;
                         }
 

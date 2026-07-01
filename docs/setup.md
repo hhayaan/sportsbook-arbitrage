@@ -211,6 +211,9 @@ Common Rust variables:
 | `SKIP_LIVE` | `1` skips live markets |
 | `ODDS_FETCH_TIMEOUT_MS` | per-source fetch deadline |
 | `LIVE_ALLOWED_PAIRS` | optional live placement pair allowlist, for example `fanduel/pinnacle`; scanning remains unchanged |
+| `LIVE_ALLOWED_MARKET_TYPES` | optional live market-type allowlist; default is `moneyline,spread,total,team_total` |
+| `EXPANDED_MARKET_SCAN` | `1`/true enables HAR-backed per-event and related-market scanning; enabled by default |
+| `EXPANDED_MARKET_MAX_EVENTS_PER_SPORT` | max events per sport used for expanded scan fanout; default `8` |
 | `PIN_FILL_TIMEOUT_MS` | Pinnacle fill-report wait |
 | `FILL_TIMEOUT_MS` | non-Pinnacle fill-report wait |
 | `MAX_RESCUE_LOSS` | optional rescue-loss cap |
@@ -231,6 +234,8 @@ Common Node variables:
 | --- | --- |
 | `WS_PORT` | bet placer WebSocket port |
 | `PIN_ODDS_PORT` | authenticated Pinnacle odds bridge port |
+| `PIN_SNAPSHOT_RELATED` | include Pinnacle related matchups/markets in authenticated snapshots; enabled by default |
+| `PIN_RELATED_MAX_MATCHUPS` | max parent matchups fetched for Pinnacle related data; default `8` |
 | `DK_PROXY_PORT` | DK proxy port |
 | `DK_PROXY_FETCH_TIMEOUT_MS` | DK proxy upstream deadline |
 | `FD_WRITE_TIMEOUT_MS` | FanDuel cashout write timeout |
@@ -240,6 +245,7 @@ Common Node variables:
 - Keep stakes small while validating live behavior.
 - Check `engine\data\bets\<attempt_id>.jsonl` after any incident.
 - For FD/PIN or DK/PIN scan diagnosis, run one scan with `DETECTOR_TELEMETRY=1` and inspect `engine\data\events.jsonl`.
+- For market-expansion scan diagnosis, run with `DETECTOR_TELEMETRY=1`, `EXPANDED_MARKET_SCAN=1`, and keep the default `LIVE_ALLOWED_MARKET_TYPES` so props remain scan/paper only.
 - Cashout attempts may appear in telemetry without a matching terminal line.
 - If Pinnacle says accepted but Rust times out, inspect the fill report path immediately; accepted Pinnacle IDs must reach Rust as parseable `bet_id`/`purchase_id`.
 - If a high-percent arb appears, inspect `pin_venue_market_id`; full-game Pinnacle moneyline must be `s;0;m`, not `s;<nonzero>;m`.

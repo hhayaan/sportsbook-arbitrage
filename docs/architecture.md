@@ -91,6 +91,7 @@ DraftKings:
 - Rust calls `http://127.0.0.1:{DK_PROXY_PORT}/dk/{leagueId}`, default port `3403`.
 - The proxy uses Node `fetch` against DraftKings public Ontario endpoints.
 - Rust falls back to direct DraftKings public fetch if the proxy path fails.
+- When `EXPANDED_MARKET_SCAN` is enabled, Rust also calls `http://127.0.0.1:{DK_PROXY_PORT}/dk-event/{eventId}/{subcategoryId}` for HAR-backed per-event subcategory markets such as player props and alternate line menus.
 
 FanDuel:
 
@@ -98,13 +99,16 @@ FanDuel:
 - Soccer uses the FanDuel event-type path once, then maps supported competition names into the configured league namespaces: `MLS`, `EPL`, `LA_LIGA`, `SERIE_A`, `BUNDESLIGA`, `LIGUE_1`, and `UCL`.
 - Unsupported FanDuel soccer competitions are skipped instead of being compared under generic `SOCCER`.
 - FanDuel scan data is public. Authenticated FD checks happen later through `validate_soft`.
+- When `EXPANDED_MARKET_SCAN` is enabled, Rust fetches FanDuel event-page payloads for discovered event IDs and parses normal two-way line markets plus over/under player props.
 
 Pinnacle:
 
 - Rust defaults to `PIN_ODDS_SOURCE=auth`.
 - Auth mode calls `GET /pinnacle/snapshot/{leagueId}` on `PIN_AUTH_ODDS_BASE_URL`, default `http://127.0.0.1:3404`.
-- The bet placer uses the single logged-in Pinnacle browser session to fetch authenticated Arcadia `matchups` and `markets/straight`.
+- The bet placer uses the single logged-in Pinnacle browser session to fetch authenticated Arcadia `matchups`, `markets/straight`, and, when enabled, related matchups plus related straight markets for specials.
 - Guest mode exists only when `PIN_ODDS_SOURCE=guest` or `PIN_ODDS_SOURCE=public`.
+
+Expanded scanner fanout is controlled by `EXPANDED_MARKET_SCAN`, default true, and `EXPANDED_MARKET_MAX_EVENTS_PER_SPORT`, default `8`.
 
 Every odds fetch uses `ODDS_FETCH_TIMEOUT_MS`, default `2500`. Slow league requests should not hold the whole poll cycle for the full HTTP client timeout.
 
@@ -116,9 +120,11 @@ Each source price becomes a `CanonicalMarket` with:
 - sport and league;
 - start time;
 - market type;
+- surface key;
 - normalized selection;
 - line;
 - period;
+- player name and prop type when applicable;
 - live flag;
 - decimal and American odds;
 - venue;
@@ -140,7 +146,7 @@ Market identity includes:
 event_id + market_type + line_key + period + player_key
 ```
 
-The identity intentionally ignores mismatched live flags because sources can disagree about live state for the same game.
+The actual identity also includes `surface_key`, so game totals, team totals, and player props cannot collide when they share an over/under line shape. It intentionally ignores mismatched live flags because sources can disagree about live state for the same game.
 
 ## Detection Scope
 
@@ -148,7 +154,9 @@ Current detection is limited to two-leg arbs:
 
 - moneyline;
 - spread;
-- total.
+- total;
+- team total;
+- player prop over/under, when the scanner can build an exact event, player, prop type, period, and line identity.
 
 Current restrictions:
 
@@ -157,6 +165,7 @@ Current restrictions:
 - draw selections are rejected;
 - partial-period moneylines are skipped;
 - totals require over/under complements;
+- player props require over/under complements and fail-closed player identity;
 - spreads require different selections and opposite line signs.
 
 Arb math:
@@ -181,6 +190,8 @@ Optional detector diagnostics are available without changing terminal output. Se
 Live mode uses the WebSocket at `WS_URL`, default `ws://127.0.0.1:3402`.
 
 `LIVE_ALLOWED_PAIRS` can restrict live placement pairs without changing scanning. For example, `LIVE_ALLOWED_PAIRS=fanduel/pinnacle` still scans and prints DK/PIN opportunities, but only FD/PIN candidates can reach live execution.
+
+`LIVE_ALLOWED_MARKET_TYPES` restricts which detected market types can reach live execution. The default is `moneyline,spread,total,team_total`, so player props are scan/paper only by default even when detected.
 
 For Pinnacle-backed arbs, the normal path is:
 
@@ -228,10 +239,10 @@ data/family-dedup.json
 The family key is:
 
 ```text
-sport + event_id + soft_venue + market_type + period
+sport + event_id + soft_venue + market_type + period + surface_key + player_name + prop_type
 ```
 
-The key is order-independent for Pinnacle/soft-book pairs and intentionally excludes line and side. Successful two-leg fills record the family, start a short success cooldown, and allow limited re-entry after the cooldown. Clear soft leg-1 limit/exposure or unavailable-market failures hard-lock the family for the TTL.
+The key is order-independent for Pinnacle/soft-book pairs and intentionally excludes line and side. Surface, player, and prop type are included so unrelated props and team totals do not suppress each other. Successful two-leg fills record the family, start a short success cooldown, and allow limited re-entry after the cooldown. Clear soft leg-1 limit/exposure or unavailable-market failures hard-lock the family for the TTL.
 
 Default TTL is 6 hours. Successful fills default to a 30-second cooldown and 3 allowed repeats after the first fill. `FAMILY_DEDUP_FILE`, `FAMILY_DEDUP_TTL_MS`, `FAMILY_DEDUP_TTL_SECS`, `FAMILY_DEDUP_SUCCESS_COOLDOWN_MS`, `FAMILY_DEDUP_SUCCESS_COOLDOWN_SECS`, and `FAMILY_DEDUP_SUCCESS_MAX_REPEATS` can override the defaults. `DEDUP_COOLDOWN_MS` and `DEDUP_COOLDOWN_SECS` are accepted as compatibility aliases for the TTL.
 
@@ -267,6 +278,9 @@ Detector diagnostics, when enabled, are written into the same JSONL telemetry st
 
 These are current engineering items:
 
+- Expanded DK/FD/PIN player-prop markets are scan/paper capable, but live prop placement is not complete.
+- `player_prop` should remain outside `LIVE_ALLOWED_MARKET_TYPES` until Pinnacle special quote/place and prop-aware recovery are implemented.
+- Expanded scanner fanout increases poll-cycle work; tune `EXPANDED_MARKET_MAX_EVENTS_PER_SPORT` during live telemetry review.
 - Unknown Pinnacle period numbers are skipped instead of mapped to `full_game`; non-full-game Pinnacle moneylines are also skipped during parsing.
 - True ladder buckets and edge-improvement gates are not merged; current family dedup is intentionally broad.
 - FD authenticated scan overlay is not merged; use detector telemetry and live validation logs before deciding whether public FD scan prices are a recurring problem.

@@ -281,12 +281,27 @@ fn is_obsolete_broad_failure_lock(reason: &str) -> bool {
 
 pub fn family_key(candidate: &ArbCandidate) -> String {
     format!(
-        "{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}",
         candidate.sport.to_ascii_lowercase(),
         candidate.event_id.to_ascii_lowercase(),
         soft_venue(candidate),
         candidate.market_type.to_ascii_lowercase(),
         period_label(candidate).to_ascii_lowercase(),
+        candidate
+            .surface_key
+            .clone()
+            .unwrap_or_default()
+            .to_ascii_lowercase(),
+        candidate
+            .player_name
+            .clone()
+            .unwrap_or_default()
+            .to_ascii_lowercase(),
+        candidate
+            .prop_type
+            .clone()
+            .unwrap_or_default()
+            .to_ascii_lowercase(),
     )
 }
 
@@ -363,6 +378,9 @@ mod tests {
             event_id: "UFC:2026-05-09T17:JOABUC-vs-SEABRA".to_string(),
             sport: "UFC".to_string(),
             market_type: "moneyline".to_string(),
+            surface_key: None,
+            player_name: None,
+            prop_type: None,
             period: period.to_string(),
             start_time_utc: "2026-05-09T17:00:00Z".to_string(),
             leg1_venue: leg1_venue.to_string(),

@@ -9,7 +9,8 @@ pub struct CanonicalMarket {
     pub sport: String,
     pub league: String,
     pub start_time_utc: String,
-    pub market_type: String, // moneyline | spread | total | team_total | player_prop | alt_spread | alt_total
+    pub market_type: String, // moneyline | spread | total | team_total | player_prop
+    pub surface_key: Option<String>,
     pub selection: String,
     pub line: Option<f64>,
     pub period: String,
@@ -34,6 +35,7 @@ pub struct MarketIdentityKey {
     pub period: String,
     pub is_live: bool,
     pub player_key: String,
+    pub surface_key: String,
 }
 
 impl MarketIdentityKey {
@@ -55,6 +57,7 @@ impl MarketIdentityKey {
             (Some(name), Some(prop)) => format!("{}:{}", name, prop),
             _ => String::new(),
         };
+        let surface_key = m.surface_key.clone().unwrap_or_default();
         MarketIdentityKey {
             event_id: m.event_id.clone(),
             market_type: m.market_type.clone(),
@@ -64,6 +67,7 @@ impl MarketIdentityKey {
             // Using actual value breaks cross-venue pairing on live games.
             is_live: false,
             player_key,
+            surface_key,
         }
     }
 }
@@ -83,9 +87,12 @@ pub struct PriceEntry {
     pub sport: String,
     pub event_id: String,
     pub market_type: String,
+    pub surface_key: Option<String>,
     pub line: Option<f64>,
     pub is_live: bool,
     pub start_time_utc: String,
+    pub player_name: Option<String>,
+    pub prop_type: Option<String>,
     pub venue_market_id: String,
     pub venue_event_id: String,
 }
@@ -100,9 +107,12 @@ impl PriceEntry {
             sport: m.sport.clone(),
             event_id: m.event_id.clone(),
             market_type: m.market_type.clone(),
+            surface_key: m.surface_key.clone(),
             line: m.line,
             is_live: m.is_live,
             start_time_utc: m.start_time_utc.clone(),
+            player_name: m.player_name.clone(),
+            prop_type: m.prop_type.clone(),
             venue_market_id: m.venue_market_id.clone(),
             venue_event_id: m.venue_event_id.clone(),
         }
@@ -183,6 +193,9 @@ pub struct ArbCandidate {
     pub event_id: String,
     pub sport: String,
     pub market_type: String,
+    pub surface_key: Option<String>,
+    pub player_name: Option<String>,
+    pub prop_type: Option<String>,
     pub period: String,
     pub start_time_utc: String,
     pub leg1_venue: String,

@@ -1,5 +1,26 @@
 # Deep Research Review of the Uploaded Sports-Arbitrage Research Brief
 
+## Implementation status update - 2026-07-01
+
+This report remains the strategic market-research source, but the repo has moved forward since the original review. The current implementation status is:
+
+- HAR-backed expanded scanning is implemented for DraftKings, FanDuel, and Pinnacle two-way over/under player-prop shapes observed in `docs/HARs`.
+- DraftKings uses the per-event `eventSubcategory` market endpoint through the local `/dk-event/{eventId}/{subcategoryId}` proxy route.
+- FanDuel uses per-event `event-page` payloads for props, SOG-style markets, alt prop ladders, and two-way line markets.
+- Pinnacle scans related/special markets from the authenticated snapshot bridge and guest related endpoints.
+- Canonical market identity now includes `surface_key`, and arb candidates carry `player_name` and `prop_type`.
+- Live execution is still gated. `LIVE_ALLOWED_MARKET_TYPES` defaults to `moneyline,spread,total,team_total`, so `player_prop` markets are scan/paper only unless explicitly enabled.
+- Pinnacle player-prop specials use `SP:{specialMatchupId}:{marketKey}:{participantId}` venue IDs. That is a safety marker, not a completed placement path.
+
+The most important correction is MLB first-inning / NRFI. The collected Pinnacle MLB straight-market HAR showed period `s;1` as first five innings, not first inning. DraftKings and FanDuel expose true first-inning/NRFI-style markets, but a current Pinnacle-backed live arb cannot be formed unless a true Pinnacle first-inning surface is captured later.
+
+Therefore, the current engineering order is:
+
+1. Validate HAR-backed scan-only telemetry for DK/FD/PIN player-prop O/U surfaces.
+2. Keep full-game moneyline/spread/total/team-total as the only default live market types.
+3. Build Pinnacle special quote/place, prop-aware soft validation, and recovery before any live player-prop trading.
+4. Capture soccer-corners HARs if soccer corners remain the next non-prop target.
+
 ## Executive summary
 
 The uploaded PDF is a 22-page research brief about a production sports-arbitrage stack using entity["company","DraftKings","sportsbook company"] and entity["company","FanDuel","sports betting company"] for execution in entity["state","Ontario","province, canada"], with entity["company","Pinnacle","sportsbook company"] as a reference and potential hedge venue. It is not itself a finished research output; it is a scoped research agenda covering eight target market “surfaces” and a final prioritization formula. The document’s strongest feature is breadth and operational specificity. Its weakest feature is that many of its most important ranking inputs are assumptions rather than validated facts: Ontario-specific market parity, API coverage, stake limits, and realized profitability are mostly asserted as research questions rather than evidenced findings. fileciteturn0file0
@@ -99,6 +120,8 @@ The PDF is strongest as a roadmap when converted into a staged validation progra
 | Lower | Engineering spike on FanDuel alt spreads | Valuable only after confirming alt-line extraction path and straight-bet executability | 1–2 working days | 1 engineer |
 
 A practical production ordering, based on current evidence quality rather than speculative upside, is: **soccer corners**, **MLB first-inning runs/NRFI-YRFI**, **golf matchups**, **mainstream player props**, **F1 matchups**, **UFC distance**, **FanDuel basketball alt spreads**, and then the decomposed long-tail two-way surfaces. The reason is simple: the first four have the best mix of public rule clarity, visible market existence, and manageable normalization scope. citeturn11view1turn3view4turn24search8turn12view2turn15view0turn17view0turn8view6
+
+Operational correction as of 2026-07-01: the old ordering above is historical market-research context, not the current engineering queue. The active queue is HAR-backed player-prop scan validation first, then prop placement plumbing if telemetry warrants it, with soccer corners next only after DK/FD/PIN corner HARs are captured. MLB first-inning/NRFI is not a live target while the only captured Pinnacle period evidence maps `s;1` to first five innings.
 
 ## Suggested visualizations
 
