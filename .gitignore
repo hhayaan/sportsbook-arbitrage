@@ -4,6 +4,10 @@ node_modules/
 # Temporary documentation
 docs/HARs/
 
+# Local agent state
+.codex/
+.agents/
+
 # Browser profiles and session data
 data/profiles/
 data/cookies/

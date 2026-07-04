@@ -122,6 +122,8 @@ async function main() {
         league_id: leagueId,
         matchups: snapshot.matchups,
         markets: snapshot.markets,
+        related_matchups: snapshot.related_matchups || [],
+        related_markets: snapshot.related_markets || [],
       });
     } catch (err) {
       sendJson(500, { status: "error", error: err.message });
