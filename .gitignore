@@ -1,8 +1,9 @@
 # Dependencies
 node_modules/
 
-# Temporary documentation
+# Temporary documents and logs
 docs/HARs/
+logs/
 
 # Local agent state
 .codex/
